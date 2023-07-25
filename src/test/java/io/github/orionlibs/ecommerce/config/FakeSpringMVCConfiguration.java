@@ -1,6 +1,6 @@
-package io.github.orionlibs.project_name.config;
+package io.github.orionlibs.ecommerce.config;
 
-import io.github.orionlibs.project_name.NewClass;
+import io.github.orionlibs.ecommerce.NewClass;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;

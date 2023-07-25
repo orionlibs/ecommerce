@@ -1,13 +1,15 @@
-package io.github.orionlibs.project_name;
+package io.github.orionlibs.ecommerce;
 
-import io.github.orionlibs.project_name.config.FakeTestingSpringConfiguration;
-import io.github.orionlibs.project_name.log.ListLogHandler;
+import io.github.orionlibs.ecommerce.config.FakeTestingSpringConfiguration;
+import io.github.orionlibs.ecommerce.log.ListLogHandler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
@@ -18,7 +20,7 @@ import org.springframework.test.context.web.WebAppConfiguration;
 @ContextConfiguration(classes = FakeTestingSpringConfiguration.FakeConfiguration.class)
 @WebAppConfiguration
 @TestInstance(Lifecycle.PER_CLASS)
-//@Execution(ExecutionMode.CONCURRENT)
+@Execution(ExecutionMode.CONCURRENT)
 public class NewClassTest
 {
     private ListLogHandler listLogHandler;

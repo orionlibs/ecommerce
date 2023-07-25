@@ -1,4 +1,4 @@
-package io.github.orionlibs.project_name.config;
+package io.github.orionlibs.ecommerce.config;
 
 /**
  * provides access to the plugin's config
