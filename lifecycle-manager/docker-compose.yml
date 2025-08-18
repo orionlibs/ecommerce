@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ../
+      dockerfile: lifecycle-manager/Dockerfile
+      args:
+        serviceName: lifecycle-manager
+    image: lifecycle-manager:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      ALARM_DATABASE_URL: "${LIFECYELE_DATABASE_URL}"
+      ALARM_DATABASE_USERNAME: "${LIFECYELE_DATABASE_USERNAME}"
+      ALARM_DATABASE_PASSWORD: "${LIFECYELE_DATABASE_PASSWORD}"

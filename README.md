@@ -1,6 +1,12 @@
 # Platform
 This monorepo hosts a number of Spring Boot Dockerisable microservices and commons libraries, that constitute the platform for a Unified Namespace-powered eCommerce enterprise that is digitally transforming/transformed. Continuous Integration is performed by GitHub Actions. This project consists only of backend services. No frontend.
 
+
+# Features
+1. reusable lifecycle management service of entities
+
+
+# Build and Run
 To build and install a library (not a service) to local maven run
 ```shell
 $ cd core
