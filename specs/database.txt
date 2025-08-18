@@ -1,0 +1,31 @@
+Use virtual threads for non-transaction database operations. Increase the connection pool size
+Thread.startVirtualThread(() -> {
+            List<User> users = jdbcTemplate.query("SELECT * FROM users", userRowMapper());
+            users.forEach(user -> System.out.println("User: " + user));
+        });
+        
+In the databases tool we show a table of databases that the system is configured to connect to. It shows database name (like "core"), number of current errors, elapsed time of connection, details button. When we click details it goes to a page with info about the database like name, errors, elapsed time of connection, connection URL, total number of read queries, create queries, update queries, delete queries, total number of queries, currently running queries (query itself + elapsed time, when it started), queries per second, full error details. If there is no connection at the moment then show "attempt connection" button. If it is connected then show "disconnect" button. Show "delete database" button except for the core database. Show "migrate" button to configure the migration of the database to another (show option to migrate data or only create the DDL). Show percentage of queries that completed within a second. Show button to export the queries that have run using datetime range. Show logs table specific to each page. Every log table can be exported
+
+Every database connection has its own store and forward engine. Create page "store and forward". Show number of engines. Show table with engine, buffer size, number of queries forwarded/stored/quarantined, number of queries dropped because of buffer overflow or no database connection, number of records forwarded per second, details button. In the details page we see all info from the table above plus progress bar of percentage of buffer use, button to export and import quarantined records, number of failed attempts to forward quarantined records, reason for quarantine, button to retry a quarantined record, button to delete a quarantined record
+
+In database connection pages show button "run diagnostics" to check connection and more
+
+Create database explorer tool like MySQL workbench
+
+Create a DSL to run commands
+
+Create "change core database connection" button in the config page
+
+Create "migrate core database" button in config page in order to connect to a new database server and copy all tables from the old database to the new one. We need a way to ask the old database to give us all tables schemas or just give us a MySQL dump file so that we can run it in the new database server. Once the migration finishes, we stop the old connection and use the new one
+
+Create project "fluent-sql" and move the MySQL query builder there
+
+Show number of database tables and records we have
+
+Allow the database engine to be able to take a JSON string and save it or update
+
+Create DatabaseQueryMetric class that stores a query, start time and duration
+
+In databases table create "test connection" button
+
+Show average number of database operations per minute/hour

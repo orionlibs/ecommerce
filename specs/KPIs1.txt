@@ -1,0 +1,376 @@
+- **Code Quality Metrics** (e.g., Cyclomatic Complexity, Code Churn, Maintainability Index)  
+- **Code Review Metrics** (e.g., Review Time, Review Coverage, Number of Defects Found)  
+- **Commit Frequency** (e.g., Commits per Day/Week)  
+- **Development Velocity** (e.g., Features Completed per Sprint, Lead Time for Changes)  
+- **Refactoring Efforts** (e.g., Percentage of Codebase Refactored per Quarter)  
+- **Sprint Metrics** (e.g., Velocity, Sprint Burndown, Work Completed vs. Planned)  
+- **Story Points Completed vs. Planned**  
+- **Cycle Time & Lead Time** (Time from Development Start to Deployment)  
+- **Technical Debt** (e.g., Outstanding Bug Count, Time Spent on Fixing Issues vs. New Features)  
+- **Deployment Frequency** (e.g., Number of Deployments per Day/Week)  
+- **Change Failure Rate** (Percentage of Deployments That Cause Failures)  
+- **Mean Time to Recover (MTTR)** (How Fast the Team Fixes Issues After Deployment)  
+- **Mean Time Between Failures (MTBF)**  
+- **Rollback Rate** (Percentage of Deployments That Need to Be Rolled Back)  
+- **System Uptime & Availability** (e.g., SLA Compliance)  
+- **Response Time & Latency**  
+- **Throughput** (Requests per Second, Data Processed per Second)  
+- **Error Rate** (e.g., 500 Errors per Hour, API Failure Rate)  
+- **Incident Frequency & Severity** (e.g., P1/P2 Incidents per Month)  
+- **Number of Security Vulnerabilities Detected**  
+- **Time to Patch Security Vulnerabilities**  
+- **Number of Security Incidents per Quarter**  
+- **Compliance Audit Results** (e.g., ISO 27001, SOC 2)  
+- **Access Control Violations**  
+- **Developer Satisfaction Score (eNPS)**  
+- **Time Spent on Coding vs. Meetings**  
+- **Context Switching Frequency** (e.g., Number of Tasks a Developer Juggles Daily)  
+- **Training & Learning Metrics** (e.g., Certifications Earned, Learning Hours per Quarter)  
+- **System Modularity Score** (e.g., Number of Microservices vs. Monolith Components)  
+- **Service Dependency Complexity** (e.g., Number of Interdependent Services per Feature)  
+- **Scalability Metrics** (e.g., Horizontal Scaling Time, Auto-Scaling Efficiency)  
+- **Time to Add a New Service to the Architecture**  
+- **Test Coverage Percentage** (Unit, Integration, E2E)  
+- **Test Execution Time** (e.g., Time to Run Full Regression Tests)  
+- **Test Pass/Fail Rate** (e.g., Percentage of Tests Passing Per Release)  
+- **Defect Escape Rate** (Bugs Found in Production vs. Pre-Release)  
+- **Automated vs. Manual Testing Ratio**  
+- **Bug Reopen Rate** (Percentage of Fixed Bugs That Reappear)  
+- **Mean Time to Detect (MTTD)** (Average Time to Identify a Defect)   
+- **API Latency** (P50, P90, P99 Response Time)  
+- **API Uptime & Availability** (SLA Compliance)  
+- **Error Rate Per API Endpoint**  
+- **API Throttling & Rate-Limiting Metrics**  
+- **Client-Side API Performance Metrics** (Time to First Byte, Overall Response Time)  
+- **Number of API Deprecations & Breaking Changes**  
+- **Infrastructure Cost per Deployment** (AWS/GCP/Azure Costs)  
+- **CI/CD Pipeline Execution Costs**  
+- **Cloud Service Utilization Efficiency** (CPU, Memory, Network Utilization)  
+- **Cost per API Call** (e.g., Cloud Billing per Million API Calls)  
+- **Developer Time Spent on Non-Engineering Tasks**  
+
+
+
+#### **1.1 Static Code Metrics (Measured Using Static Analysis Tools like SonarQube, CodeClimate, etc.)**  
+- **Cyclomatic Complexity** – Measures the complexity of a function/method based on the number of branches.  
+- **Maintainability Index** – A score (0-100) indicating how easy it is to maintain the codebase.  
+- **Code Duplication Percentage** – Percentage of duplicated code across the repository.  
+- **Lines of Code (LoC)** – Measures total lines of code (can indicate bloat).  
+- **Comment Density** – Percentage of lines that contain comments.  
+- **Class/Function Size** – Average number of lines per class/function (high values indicate potential refactoring needs).  
+- **Dead Code Ratio** – Percentage of unused code in the repository.  
+
+#### **1.2 Test Coverage Metrics**  
+- **Unit Test Coverage** – Percentage of code covered by unit tests.  
+- **Integration Test Coverage** – Percentage of code exercised in integration tests.  
+- **End-to-End (E2E) Test Coverage** – How much of the full system is covered by tests.  
+- **Mutation Testing Score** – Measures how well the test suite detects code changes.  
+
+#### **1.3 Code Review Metrics**  
+- **Review Coverage** – Percentage of code changes that undergo peer review.  
+- **Average Review Time** – Time taken to review a pull request (PR).  
+- **Number of Review Comments per PR** – More comments may indicate poor initial code quality.  
+- **Defects Found per Review** – Average number of issues found in a code review.  
+
+#### **1.4 Code Churn Metrics**  
+- **Code Churn Rate** – Percentage of modified code that was recently written (high churn suggests instability).  
+- **Rework Ratio** – Percentage of rewritten code over a period of time.  
+- **Code Stability Index** – Measures how frequently critical parts of the codebase change.  
+
+### **2. Code Quality KPIs**  
+- **Technical Debt Ratio** – The ratio of maintenance costs vs. new feature development.  
+- **Bug Rate in Production** – Number of critical bugs per 1,000 lines of code.  
+- **Code Review Effectiveness** – Percentage of PRs that find at least one defect.  
+- **Defect Density** – Number of bugs per 1,000 lines of code.  
+- **Merge Time Efficiency** – Average time between code submission and merging.  
+- **Automated Linting Compliance** – Percentage of PRs that pass linting without manual intervention.  
+- **Code Refactoring Rate** – Percentage of old code that gets refactored each sprint.  
+- **Security Vulnerability Density** – Number of security issues per 1,000 lines of code.  
+
+### **1.1 Agile Development Metrics**  
+- **Sprint Velocity** – Average story points completed per sprint.  
+- **Sprint Burndown Rate** – Tasks completed vs. tasks remaining in a sprint.  
+- **Epic & Release Burndown** – Progress toward completing an epic or release.  
+- **Story Completion Rate** – Percentage of stories completed per sprint vs. planned.  
+- **Backlog Health** – Ratio of backlog size to velocity (healthy backlog = 2-3x sprint capacity).  
+- **Work in Progress (WIP) Limits Compliance** – Percentage of time teams adhere to WIP limits.  
+- **Cycle Time** – Time taken to complete a task from start to finish.  
+- **Lead Time for Changes** – Time from idea inception to production release.  
+- **Blocked Work Items** – Number of tasks that were blocked and for how long.  
+- **Defect Leakage** – Percentage of defects found after a sprint is closed.  
+
+### **1.2 DevOps Delivery Metrics** *(DORA Metrics)*  
+- **Deployment Frequency** – How often releases occur (e.g., daily, weekly).  
+- **Lead Time for Changes** – Time from code commit to deployment in production.  
+- **Change Failure Rate** – Percentage of deployments that cause failures.  
+- **Mean Time to Recover (MTTR)** – Time taken to restore service after failure.  
+
+### **1.3 CI/CD & Automation Metrics**  
+- **Build Success Rate** – Percentage of CI/CD pipeline runs that succeed.  
+- **Build Failure Rate** – Percentage of builds that fail due to errors.  
+- **Time to Build & Deploy** – Total time to compile, test, and deploy an application.  
+- **Automated Test Pass Rate** – Percentage of automated tests that pass.  
+- **Time to Fix Broken Builds** – Average time taken to resolve build failures.  
+
+### **1.4 Incident Management Metrics**  
+- **Mean Time to Acknowledge (MTTA)** – Time taken to acknowledge an incident.  
+- **Mean Time to Detect (MTTD)** – Time to identify an issue before resolution begins.  
+- **Incident Escalation Rate** – Percentage of incidents that require senior-level intervention.  
+- **Post-Mortem Completion Rate** – Percentage of incidents followed by a root cause analysis.  
+
+## **2. Agile & DevOps KPIs**
+- **Agile Adoption Score** – Percentage of teams following Agile best practices.  
+- **Sprint Success Rate** – Percentage of sprints completed with all planned tasks.  
+- **Customer Satisfaction (CSAT) for Features** – User feedback score for deployed features.  
+- **Release Stability Index** – Number of post-release bugs per deployment.  
+- **Code Review to Merge Time** – Time taken for a code change to be merged after review.  
+- **Production Defect Density** – Number of defects per 1,000 lines of code deployed.  
+- **CI/CD Deployment Success Rate** – Percentage of successful deployments without rollback.  
+- **Automated Test Coverage** – Percentage of code covered by automated tests.  
+- **MTTR Trend Analysis** – MTTR reduction over time to assess improvement.  
+
+### **1.1 Delivery Speed & Efficiency Metrics**  
+- **Deployment Frequency** – Number of deployments per day/week/month.  
+- **Lead Time for Changes** – Time from code commit to production release.  
+- **Cycle Time** – Time from task start to task completion.  
+- **Commit-to-Deploy Time** – How long it takes for a single code change to go live.  
+- **Merge Time** – Time from pull request (PR) creation to merge.  
+- **Branch Lifetime** – Average time a branch remains open before merging.  
+
+### **1.2 Release Stability & Quality Metrics**  
+- **Change Failure Rate** – Percentage of deployments that cause failures.  
+- **Rollback Rate** – Percentage of releases that require rollback.  
+- **Hotfix Rate** – Number of emergency fixes deployed post-release.  
+- **Post-Release Defect Rate** – Number of critical bugs per release.  
+- **Release Success Rate** – Percentage of deployments completed without issues.  
+
+### **1.3 CI/CD Pipeline Performance Metrics**  
+- **Build Success Rate** – Percentage of successful builds vs. total builds.  
+- **Build Failure Rate** – Percentage of builds that fail.  
+- **Average Build Time** – Time taken for a build to complete.  
+- **Pipeline Execution Time** – Total time for a CI/CD pipeline to complete.  
+- **Test Pass Rate in CI/CD** – Percentage of automated tests that pass.  
+- **Failed Deployment Recovery Time** – Time taken to fix failed deployments.  
+
+### **1.4 Deployment Risk & Reliability Metrics**  
+- **Deployment Size** – Number of changed lines of code per deployment.  
+- **Feature Toggle Usage** – Percentage of features released via feature flags.  
+- **Blue-Green Deployment Success Rate** – Percentage of successful blue-green deployments.  
+- **Canary Deployment Failure Rate** – Percentage of failures in canary releases.  
+- **Production Stability Index** – Measures uptime and post-release issues.  
+
+## **2. Software Delivery & Deployment KPIs**  
+- **Zero-Downtime Deployment Rate** – Percentage of deployments completed with zero downtime.  
+- **Production Deployment Frequency** – How often production deployments occur.  
+- **Mean Time to Recovery (MTTR)** – Average time to recover from a failed deployment.  
+- **Percentage of Automated Deployments** – Ratio of manual vs. automated deployments.  
+- **Cost per Deployment** – Infrastructure and resource costs per release.  
+- **Service-Level Agreement (SLA) Compliance** – Adherence to SLA uptime guarantees.  
+
+### **1.1 Code Contribution & Activity Metrics**  
+- **Commit Frequency** – Number of commits per developer per day/week/month.  
+- **Pull Request (PR) Throughput** – Number of PRs merged per sprint.  
+- **PR Review Time** – Average time taken for a PR to be reviewed and approved.  
+- **Code Churn Rate** – Percentage of code rewritten or modified shortly after being committed.  
+- **Time to Merge** – Average time from PR creation to merge.  
+- **Lines of Code (LoC) per Developer** – Number of lines written per developer (should be analyzed alongside quality metrics).  
+
+### **1.2 Work Efficiency & Flow Metrics**  
+- **Cycle Time** – Time taken from starting a task to completing it.  
+- **Lead Time** – Time from feature request to production deployment.  
+- **Work in Progress (WIP) Limit Compliance** – Percentage of time teams adhere to WIP limits.  
+- **Task Completion Rate** – Percentage of planned tasks completed in a sprint.  
+- **Developer Focus Time** – Amount of uninterrupted coding time per day.  
+
+### **1.3 Collaboration & Teamwork Metrics**  
+- **Review Participation Rate** – Percentage of developers actively reviewing code.  
+- **Pair Programming Ratio** – Percentage of tasks completed via pair programming.  
+- **Cross-Team Dependency Resolution Time** – Time taken to resolve blockers caused by dependencies.  
+
+### **1.4 Meeting & Communication Metrics**  
+- **Time Spent in Meetings per Developer** – Percentage of working hours spent in meetings.  
+- **Slack/Messaging Interruptions per Day** – Number of work disruptions per developer.  
+- **Documentation Coverage** – Percentage of modules with sufficient documentation.  
+
+## **2. Development Productivity KPIs**  
+- **Feature Completion Rate** – Percentage of planned features delivered per sprint.  
+- **Sprint Success Rate** – Percentage of sprints completed with all planned tasks.  
+- **Defect Rate per Feature** – Number of defects reported per new feature.  
+- **Developer Satisfaction Score** – Survey-based metric on developer happiness.  
+- **Time to First Response on PRs** – How quickly PRs receive a review.  
+- **Percentage of Automated Tasks** – Ratio of manual vs. automated workflows.  
+
+### **1.1 Code Quality & Maintainability Metrics**  
+- **Code Coverage** – Percentage of code covered by automated tests.  
+- **Cyclomatic Complexity** – Number of independent paths in the code (lower is better).  
+- **Code Churn Rate** – Percentage of code modified soon after being written.  
+- **Code Review Defect Rate** – Number of issues found during code reviews.  
+- **Technical Debt Ratio** – Percentage of development effort needed to fix code issues.  
+- **Static Code Analysis Score** – Quality rating based on static code analysis tools.  
+
+### **1.2 Bug & Defect Metrics**  
+- **Defect Density** – Number of defects per 1,000 lines of code (KLOC).  
+- **Escaped Defects** – Number of defects found in production vs. pre-release.  
+- **Mean Time to Detect (MTTD)** – Time taken to identify defects after deployment.  
+- **Mean Time to Resolve (MTTR)** – Average time taken to fix defects.  
+- **Reopened Bug Rate** – Percentage of previously fixed defects that reappear.  
+
+### **1.3 Testing & CI/CD Metrics**  
+- **Test Pass Rate** – Percentage of test cases that pass in CI/CD pipelines.  
+- **Flaky Test Rate** – Percentage of tests that fail inconsistently.  
+- **Automated vs. Manual Testing Ratio** – Percentage of tests that are automated.  
+- **Time to Execute Tests** – Average time taken to run test suites.  
+- **Deployment Failure Rate** – Percentage of deployments that fail due to bugs.  
+
+### **1.4 Security & Compliance Metrics**  
+- **Security Vulnerabilities per Release** – Number of security issues detected.  
+- **Time to Fix Security Issues** – Average time to resolve security vulnerabilities.  
+- **Code Compliance Score** – Adherence to industry coding standards.  
+
+### **1.5 User Experience & Stability Metrics**  
+- **Application Crash Rate** – Number of crashes per user session.  
+- **User-Reported Bugs** – Number of defects reported by end users.  
+- **Customer Satisfaction Score (CSAT)** – User feedback score based on feature quality.  
+- **Service-Level Agreement (SLA) Compliance** – Adherence to uptime guarantees.  
+
+## **2. Software Quality KPIs**  
+- **Defect Escape Rate** – Percentage of defects that reach production.  
+- **Code Maintainability Index** – A composite score for code readability and complexity.  
+- **Test Coverage Target Compliance** – Adherence to automated test coverage goals.  
+- **Incident Recovery Time** – Speed of recovering from software failures.  
+- **Percentage of Critical Bugs Fixed in First Attempt** – Effectiveness of defect resolution.  
+- **Compliance with Security Best Practices** – Percentage of releases that pass security audits.  
+
+### **1.1 Product Usage & Engagement Metrics**  
+- **Daily Active Users (DAU)** – Number of unique users who engage with the product daily.  
+- **Monthly Active Users (MAU)** – Number of unique users who engage with the product monthly.  
+- **DAU/MAU Ratio (Stickiness)** – Percentage of monthly users who return daily.  
+- **Feature Adoption Rate** – Percentage of users who engage with a new feature.  
+- **Session Length** – Average time users spend in the product per session.  
+- **User Retention Rate** – Percentage of users who continue using the product over time.  
+- **Churn Rate** – Percentage of users who stop using the product.  
+- **Customer Lifetime Value (CLV)** – Estimated revenue a user generates over their lifetime.  
+
+### **1.2 Conversion & Growth Metrics**  
+- **Customer Acquisition Cost (CAC)** – Cost of acquiring a new customer.  
+- **Conversion Rate** – Percentage of users who complete a desired action (e.g., sign-up, purchase).  
+- **Trial-to-Paid Conversion Rate** – Percentage of trial users who become paying customers.  
+- **Revenue Growth Rate** – Monthly or annual percentage increase in revenue.  
+- **User Growth Rate** – Rate at which new users sign up for the product.  
+
+### **1.3 Customer Satisfaction & Feedback Metrics**  
+- **Net Promoter Score (NPS)** – Measures customer loyalty and likelihood to recommend.  
+- **Customer Satisfaction Score (CSAT)** – Direct user feedback on satisfaction.  
+- **Customer Effort Score (CES)** – Measures ease of completing an action in the product.  
+- **Support Ticket Volume** – Number of customer support issues raised.  
+- **Feature Request Volume** – Number of feature requests received from users.  
+
+### **1.4 Product Performance & Stability Metrics**  
+- **Application Crash Rate** – Number of crashes per user session.  
+- **Page Load Time** – Average time taken for pages to load.  
+- **API Response Time** – Average time for APIs to respond to requests.  
+- **Error Rate** – Percentage of user actions that result in errors.  
+- **Uptime Percentage** – Product availability over a given period.  
+
+## **2. Product Management KPIs**  
+- **Feature Adoption Rate** – Tracks how many users engage with new features.  
+- **Retention Rate (30, 60, 90 Days)** – Measures user retention over time.  
+- **Churn Rate** – Tracks user drop-off trends.  
+- **Customer Acquisition Cost (CAC) to CLV Ratio** – Ensures customer acquisition remains cost-effective.  
+- **Revenue per User (ARPU)** – Measures the average revenue per user.  
+- **Time-to-Market for New Features** – Tracks how quickly features are launched.  
+- **Customer Support Response Time** – Measures how quickly support teams respond to tickets.  
+
+### **1.1 Lead Generation & Demand Metrics**  
+- **Number of Marketing-Qualified Leads (MQLs)** – Leads identified as potential buyers.  
+- **Number of Sales-Qualified Leads (SQLs)** – Leads verified by sales as ready to buy.  
+- **Lead Conversion Rate** – Percentage of leads that become paying customers.  
+- **Cost per Lead (CPL)** – Average cost of acquiring a new lead.  
+- **Lead-to-Customer Rate** – Percentage of leads that convert to customers.  
+
+### **1.2 Sales Performance Metrics**  
+- **Total Revenue** – Overall revenue generated within a specific period.  
+- **Sales Growth Rate** – Percentage increase in sales over time.  
+- **Average Deal Size** – Average revenue per closed deal.  
+- **Win Rate** – Percentage of deals won vs. total deals.  
+- **Sales Cycle Length** – Average time from first contact to closing a deal.  
+- **Quota Attainment** – Percentage of sales reps meeting or exceeding targets.  
+
+### **1.3 Customer Acquisition & Retention Metrics**  
+- **Customer Acquisition Cost (CAC)** – Cost to acquire a new customer.  
+- **Customer Lifetime Value (CLV)** – Total revenue a customer generates over their lifetime.  
+- **Churn Rate** – Percentage of customers lost over a period.  
+- **Renewal Rate** – Percentage of customers renewing their contracts.  
+- **Upsell & Cross-Sell Revenue** – Revenue from existing customers upgrading or purchasing additional services.  
+
+### **1.4 Marketing Channel Effectiveness Metrics**  
+- **Website Traffic** – Number of visitors to the website.  
+- **Conversion Rate per Channel** – Performance of different marketing channels (e.g., paid ads, email, social media).  
+- **Cost per Click (CPC)** – Cost of each ad click.  
+- **Return on Ad Spend (ROAS)** – Revenue generated per dollar spent on ads.  
+- **Email Open & Click-Through Rates** – Engagement with email marketing campaigns.  
+- **Social Media Engagement** – Likes, shares, comments, and click-through rates.  
+
+### **1.5 Brand & Customer Perception Metrics**  
+- **Net Promoter Score (NPS)** – Measures customer loyalty and likelihood to recommend.  
+- **Customer Satisfaction Score (CSAT)** – Direct customer feedback on satisfaction.  
+- **Brand Awareness Score** – Survey-based metric measuring brand recognition.  
+
+## **2. Sales & Marketing KPIs**  
+- **Sales Target Achievement** – Percentage of revenue target met.  
+- **Marketing ROI** – Revenue generated per dollar spent on marketing.  
+- **Customer Retention Rate** – Percentage of customers retained over a given period.  
+- **Lead Response Time** – Average time taken to follow up with a new lead.  
+- **Pipeline Velocity** – Speed at which leads move through the sales funnel.  
+- **Cost of Customer Retention vs. Acquisition** – Ratio of retention efforts vs. acquiring new customers.  
+- **Content Engagement Rate** – How well marketing content drives interactions.  
+
+### **1.1 Profitability Metrics**  
+- **Gross Profit Margin** – Percentage of revenue remaining after deducting direct costs of goods/services sold.  
+- **Operating Profit Margin** – Operating income as a percentage of revenue, excluding interest and taxes.  
+- **Net Profit Margin** – Net income as a percentage of revenue, accounting for all expenses.  
+- **EBITDA (Earnings Before Interest, Taxes, Depreciation, and Amortization)** – A measure of operational profitability.  
+- **EBITDA Margin** – EBITDA as a percentage of total revenue.  
+- **Return on Assets (ROA)** – Net income divided by total assets, measuring how efficiently assets generate profit.  
+- **Return on Equity (ROE)** – Net income divided by shareholders' equity, measuring profitability relative to equity.  
+
+### **1.2 Revenue & Growth Metrics**  
+- **Revenue Growth Rate** – Percentage increase in revenue over a specific period.  
+- **Recurring Revenue (ARR/ MRR)** – Annual recurring revenue (ARR) or monthly recurring revenue (MRR), important for SaaS and subscription-based models.  
+- **Revenue Per Customer** – Average revenue generated per customer.  
+- **Revenue Per Employee** – Measures the efficiency of revenue generation per employee.  
+- **Revenue Retention Rate** – Percentage of recurring revenue retained over a period (excluding new customer revenue).  
+- **Customer Lifetime Value (CLV)** – Total revenue generated from a customer over their lifecycle.  
+- **Customer Acquisition Cost (CAC)** – Cost of acquiring a new customer, including marketing and sales expenses.  
+
+### **1.3 Cash Flow & Liquidity Metrics**  
+- **Operating Cash Flow** – Cash generated from core business operations.  
+- **Free Cash Flow** – Operating cash flow minus capital expenditures (CapEx).  
+- **Cash Flow Margin** – Operating cash flow as a percentage of revenue.  
+- **Days Sales Outstanding (DSO)** – Average number of days it takes to collect revenue after a sale.  
+- **Current Ratio** – Current assets divided by current liabilities, indicating liquidity.  
+- **Quick Ratio** – (Current assets – inventories) divided by current liabilities, providing a more conservative liquidity measure.  
+
+### **1.4 Cost & Expense Metrics**  
+- **Cost of Goods Sold (COGS)** – Direct costs of producing goods or services sold.  
+- **Operating Expenses (OPEX)** – Expenses incurred from normal business operations (sales, marketing, R&D, etc.).  
+- **R&D Expense Ratio** – Research and development expenditure as a percentage of total revenue.  
+- **Sales and Marketing Expense Ratio** – Marketing and sales expenses as a percentage of revenue.  
+- **General and Administrative Expense Ratio** – G&A expenses as a percentage of revenue.  
+- **Customer Support Cost per Customer** – Cost incurred for each customer supported.  
+
+### **1.5 Financial Efficiency Metrics**  
+- **Accounts Payable Turnover** – Number of times accounts payable are paid during a period.  
+- **Accounts Receivable Turnover** – Number of times accounts receivable are collected during a period.  
+- **Inventory Turnover** – Ratio of sales to inventory, measuring inventory efficiency (relevant for software product companies with physical products).  
+- **Capital Efficiency** – Measures how effectively capital is used to generate revenue.  
+
+## **2. Financial KPIs**  
+- **Gross Margin Improvement** – Target percentage increase in gross profit margin over a set period.  
+- **Revenue Growth Rate** – Target percentage increase in total revenue quarter-over-quarter or year-over-year.  
+- **Profit Margin** – Achieving a target profit margin (e.g., 20% net profit margin).  
+- **Customer Acquisition Cost (CAC) to Customer Lifetime Value (CLV) Ratio** – Achieve a balanced ratio where CLV is significantly greater than CAC (e.g., CLV > 3x CAC).  
+- **Operating Expense Ratio** – Keeping operating expenses below a certain percentage of revenue (e.g., below 40%).  
+- **Free Cash Flow Growth** – Target increase in free cash flow over a given period.  
+- **Return on Investment (ROI)** – Achieving a set ROI for major investments (e.g., new product development).  
+- **EBITDA Margin** – Achieving a target EBITDA margin (e.g., 30%).  

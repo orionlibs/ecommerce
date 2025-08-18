@@ -1,0 +1,169 @@
+use tagService.getCachedValueByTagPath() and tagService.getCachedValuesByTagPathFilter() everywhere we need realtime data
+
+Create a scheduled task that checks if the latest tag data also exist in the historian and vice-versa
+
+Use websocket to inform the frontend of tag changes and gauges
+
+for table tag_aliases, when we use the system to change, e.g., the "%/tickets/%" paths to "%/issues/%" then we loop through the tag group aliases and find which records match the old pattern and update the records to match the new pattern. Since the change of a (tag) folder name is done using the tag explorer, JavaScript already knows the path of the changed folder and the new path. So JavaScript will send both paths to the API that changes tag paths, and the API will find the mappings that match the old path and update them with the new path
+
+When we search for tags in the tag explorer then we call the tag cache to return the results and rebuild the tree
+
+find all the places where we query CoreTagDataLatest and use the tag data cache instead
+
+Use apexcharts tree visualizer to show the hierarchy of all tags
+
+create 4 areas in the tag explorer where the 2nd shows the value of the selected tag + tag path, the 3rd shows the data type and the 4th shows everything else
+
+When I click on a tree element, then
+1--if the element is a folder then show change name (updates all relevant tag paths accordingly), "add tag" button to add tag in this folder (prefill the tag path up to this folder), "delete folder" button
+2--if the element is a tag then show the full path, the tag provider, change name), shows data type, quality, tag properties, shows the JSON that makes up the tag, shows alarms attached to the tag, create alarm, show history of tag values taken from the historian, enable/disable historian for the tag, change data type
+
+One tag property is IsValueEditable, IsTagEditable, IsNameEditable
+
+Create "delete tag" button
+
+Create "import tags" button
+
+Create "export tags" button
+
+Create "refresh tags" button
+
+Create "rename tag" button
+
+Create "tag providers" dropdown to show all tag providers including "memory tags" (add this to the list of available providers class)
+
+Get number of tags that have a certain node as a parent
+
+Add child to a node
+
+Delete child of a node
+
+Get a node's siblings
+
+Get a node's height e.g. for a/b/c, a has height=2
+
+Get a node's depth e.g. for a/b/c, c has depth=2
+
+Get out-degree i.e. number of nodes that have this node as a direct parent
+
+Tag tree statistics using the things above
+
+Make a copy of this Node, replacing all children with copies but keeping the same instance of data and parent node
+
+Delete the parent of a node i.e. pruning
+
+Prune at a given depth
+
+Check if a node has the given node as a direct child
+
+Check if a node has the given node as a descendant
+
+See if I can make the value variable in TreeNode an Object so that we maintain tag data types
+
+Convert a tree to a table or CSV or JSON where each row has the data of a tag
+
+Convert a table or CSV or JSON if tag data to a tree
+
+Bind a tag to a MySQL query, or a script function or an API call
+
+Bind tags with events. When a particular event occurs then something happens to the bounded tag and vice-versa
+
+Have the tag cache hold metrics like number of searches, number of tag updates, number of tag deletions, number of tag additions, etc.
+
+Create tag read interceptor that runs a function right after a tag is found. Create tag update/add/delete interceptor
+
+Create tag value rules that will be applied before a tag value is saved/updated
+
+Map tags to MQTT topics
+
+Create user defined tag definitions which is an OOP way to model and instantiate tags
+
+Store UserID of user who updated a tag last and include UserID in the historian record
+
+Match a tag with a database and a query or an API call (including endpoint, headers, JSON request body, HTTP method, a particular response JSON field that has the tag value, a groovy script that processes the JSON response)
+
+Tags can be grouped together
+
+Create a few system tags like metrics for number of enabled,disabled/active (is triggered)/inactive (is not triggered)/acknowleded/unacknowledged  alarms, number of database connections, number of users (number of different IP addresses received by the websocket connection manager -- create a custom one), number of modules
+
+create API that takes a tag path and returns its value and optionally its properties
+
+Show in tag explorer the "delta" which is current_value - previous_value
+
+When we add a new tag, we can bind its value to a specific java class and method. Create a tag value bindings registry. Have tag value provider classes register themselves with the registry and mention which TagID they are bound to
+
+--create tag service interface. Create ticket tag service that implements tag service which will take a ticket model object and create the tag records for it and store them in the tags tables. Create tag provider interface. Create core tag provider which implements tag provider. Tag providers will register to the tag provider registry (like system registry). This registry will be used by the tag tree builder in order to merge all tags from all providers
+
+--create button "retag tickets" in /releases/tickets/general which will delete all tickets tags and recreate them
+
+Create tag with properties. Tags have paths, description and an optional display name, allowed range of values, unit of measurement, scaling factor (to convert Fahrenheit to Celsius for display only), DeviceID represented by the tag, edge node ID that sends the device values, current status of the device, read write permission, user authorities that can read data, user authorities that can write data, UserID that changed or added a value
+
+Copy tag to another path
+
+Tag importer using CSV and JSON
+
+Tag exporter to CSV and JSON
+
+Create report for tag history
+
+Group tags together and attach functions to a group like execution, reporting, alarms, etc.
+
+Sort tags alphabetically
+
+Search for tags using filters
+
+Change the path of a tag or group
+
+Memory tag is saved in memory
+
+Query tag represents a database query
+
+Reference tag just references another tag
+
+Function tag represents a java method
+
+Script tag represents a groovy or Jython script
+
+Configure data sources for tags (tag providers), e.g. attach a tag provider and a MySQL query that updates the tag value
+
+Tag data can be accessible by API
+
+Read tag payloads from API, MQTT and websockets
+
+Attach binary objects to tags like icons or images or PDF
+
+Create tag folder which will be marked as folder and therefore it has no value attached
+
+Create tag simulator
+
+Filter tags in various ways like "get tags in the folder [core]/studio/*/status"
+
+Active tags update their values LIVE. Inactive tags can only be updated manually. Tag groups are tags updated together. Apply various functions on tag group
+
+Use spring GraphQL to retrieve historian data
+
+Create a scheduled task that checks if the latest tag data also exist in the historian and vice-versa
+
+Add column durationInSeconds to tag_data and tag_data_latest that holds the amount of time that this tag data record was the last record until the next record arrived for this tagID. To calculate weighed average over a date range use: Weighted Value = Value * (Duration / range-in-seconds. Also add column delta which holds the value of the new record minus the value of the last record for this tagID
+
+Create a Tag class with tagID, path, value (string, integer, boolean, etc.), properties and context
+
+Take a path string and build a TreeNode for it. Take a JSON that represents a tag and build a tag object and a TreeNode from it. Convert a tag object to JSON. Convert a TreeNode to JSON. Convert a tag object to TreeNode. Convert a TreeNode to a tag object
+
+Create various OOTB tag properties like scale factor, writability, modifiability, readability, etc.
+
+Create filtering, aggregation and math functions applied to tag objects
+
+Allow creation of in-memory tags, query-based etc.
+
+Create tag folders
+
+Create tag aliases
+
+Create tag groups for values to be updated together
+
+Create logical grouping of tags. For example all tags that have to do with NSAT-1
+
+Create the dataset for charts (without using charts) for timeseries analysis
+
+Get tag parent folders, or siblings

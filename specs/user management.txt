@@ -1,0 +1,24 @@
+Create authorities table, model and DAO
+
+Create users table, model and DAO
+
+Create user settings table, model and DAO
+
+Create an admin account for me
+
+Create users tool to:
+--show all users summary table
+--show gauges for number of users, number of admins
+--Button to invite user (username, authorities and random password to give the user. It creates authority and user record, fully enabled
+--button to delete user. It deletes all database records that have to do with this user including alarms they created for themselves (not for everyone)
+--button to see user details. It shows username, UserID (if you are an admin), authorities, account creation timestamp, username of inviter, multiselector of authorities to give the user (and update button), button to disable account, button to enable account
+
+Create login button on the top right side of the navbar. Create login form with username, password and forgot password URL
+
+Create forgot password page with username and button "email me URL to reset password". That URL takes the user to a form with new password and confirm new password fields. Show a login button
+
+When the user logs in we generate a JWT cookie. The cookie expires every 350 days. The JWT expires every hour. The refresh token inside the JWT expires every century. Use CSRF inside the JWT and in a header and compare the 2 with every API call. If different then delete JWT cookie and CSRF header
+
+Configure spring security for API endpoint RBAC
+
+Create current user details page to see your own details and user settings

@@ -1,0 +1,3 @@
+Create diagnostics tool that shows connectivity status to databases, JIRA, azure DevOps and MQTT
+
+Create diagnostics tool which shows the number of scheduled activities. Show table of all scheduled activities with total number of times each activity executed, duration if last execution, fastest/slowest/average execution times

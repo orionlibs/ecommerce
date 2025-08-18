@@ -1,0 +1,11 @@
+Use websocket to inform the frontend of tag changes and gauges
+
+Show number of websocket connections
+
+Give ability to pause all LIVE updates in the GUI. See how to pause websockets
+
+Allow JavaScript to log stuff via the backend and store logs using websocket
+
+Allow java to execute JavaScript code using a websocket
+
+Create a wrapper for websocket with convenience methods

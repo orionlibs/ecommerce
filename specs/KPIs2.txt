@@ -1,0 +1,34 @@
+SDLC
+--total duration of a ticket from when it was picked up by a developer until it is marked as done
+--percentage of time a ticket stays in each state compared to the total duration of the ticket
+--average number of times a reviewer or tester sends the ticket back to the developer for repairs
+--duration between a ticket being marked as done and being deployed to production
+--number of tickets that were blocked, for how long and by whom to see how fast it takes blockers to unblock the blocked tickets
+--current percentage of technical debt that has been fixed (amount of technical debt can change over time and therefore this metric has to be calculated based on the currently known amount of technical debt)
+--time spent on fixing issues VS new features
+--time spent on fixing technical debt VS new features
+--time to deploy bug fixes VS time to deploy new features
+--average time it takes to fix vulnerability issues
+
+
+DevOps
+--average time between deployments to production
+--percentage of CI/CD pipeline runs that succeed
+--percentage of CI/CD pipeline runs that fail categorised by reason of failure
+
+
+costs
+--percentage of cloud cost for running integration tests VS total cost
+--cost per word generated
+--cost per API call
+--bottom-N clients that cost the least
+--top-N clients that cost the most
+
+
+user stats
+--number of unique users who engage with the system daily/weekly/monthly and who they are
+
+
+NLG
+--API calls per second/hour/day/month
+--amount of data processed during narrative generation

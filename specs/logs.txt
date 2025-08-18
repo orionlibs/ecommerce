@@ -1,0 +1,5 @@
+Create logs database table. Create logs tool to show all logs in a table. Create a logs table on every page (at the bottom) that shows only logs relevant to that page. Create a UNS kind of hierarchy for log tags
+
+Create logs page for all logs. Show filters, export button. Decide where to store all logs
+
+Create enum of system execution phases like initializing, running, etc. And store and log the current phase

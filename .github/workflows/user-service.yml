@@ -1,0 +1,93 @@
+name: CI/CD of user-service
+
+on:
+  push:
+    branches: [ "nonexistentbranch" ] #using a non-existent branch name causes Github to skip this workflow file
+    paths:
+      - 'user-service/**'
+      - '.github/workflows/user-service.yml'
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Use paths-filter to detect changes
+      - name: Detect changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            user-service:
+              - 'user-service/**'
+
+      - name: Set up JDK 21
+        if: steps.changes.outputs.user-service == 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Make gradlew executable
+        if: steps.changes.outputs.user-service == 'true'
+        run: find . -type f -name "gradlew" -exec chmod +x {} \;
+
+      - name: Build & publish libs to local
+        run: |
+          cd core
+          ./gradlew clean build publishToMavenLocal --refresh-dependencies --no-daemon
+
+      - name: Build & test
+        if: steps.changes.outputs.user-service == 'true'
+        run: |
+          cd ..
+          ./gradlew :user-service:build --no-daemon
+
+      - name: Skip build
+        if: steps.changes.outputs.user-service != 'true'
+        run: echo "No changes in user-service; skipping build."
+
+      #- name: Configure AWS credentials
+      #  uses: aws-actions/configure-aws-credentials@v4
+      #  with:
+      #    aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #    aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #    aws-region: ${{ secrets.AWS_REGION }}
+
+      #- name: Login to ECR
+      #  run: |
+      #    aws ecr get-login-password \
+      #    | docker login --username AWS \
+      #       --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+      #- name: Build & push Docker image
+      #  run: |
+      #    IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/uns/service1:latest
+      #    docker build --build-arg serviceName=user-service \
+      #    -f services/user-service/Dockerfile \
+      #    -t user-service:${{ github.sha }} .
+      #    docker tag user-service:${{ github.sha }} $IMAGE_URI
+      #    docker push $IMAGE_URI
+
+      #- name: Download ECS Task Definition
+      #  run: |
+      #    aws ecs describe-task-definition --task-definition uns-user-service-task --query taskDefinition > task-definition.json
+
+      #- name: Fill in the new image ID in the ECS Task Definition
+      #  id: task-def
+      #  uses: aws-actions/amazon-ecs-render-task-definition@v1
+      #  with:
+      #    task-definition: task-definition.json
+      #    container-name: uns-user-service
+      #    image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/uns/user-service:latest
+
+      #- name: Deploy Amazon ECS Task Definition
+      #  uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      #  with:
+      #    task-definition: ${{ steps.task-def.outputs.task-definition }}
+      #    service: uns-user-service-task-service-x3j6ck0t
+      #    cluster: uns-user-service
+      #    wait-for-service-stability: true

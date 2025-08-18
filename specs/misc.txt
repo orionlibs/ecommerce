@@ -1,0 +1,47 @@
+Create JIRA webhook so that the system gets notified of ticket changes and new tickets created
+
+Plugin architecture that allows modules to plugin to the system without having to change or redeploy the system itself
+
+Create telemetry project and gather data about the running backend
+
+Feature toggle
+
+create submodules registry and in the modules table show a tree for each module to show its submodules
+
+Client SDK generator
+
+Create inbound communication gateway for external systems to pass information
+
+Create a ping tool to test connections to any URL
+
+Create a few system tags like metrics for number of enabled,disabled/active (is triggered)/inactive (is not triggered)/acknowleded/unacknowledged  alarms, number of database connections, number of users (number of different IP addresses received by the websocket connection manager -- create a custom one), number of modules
+
+Create chat system to talk to the system
+
+Use spinners (preloaders)
+
+Use modals instead of JavaScript alerts
+
+Create annotation JavaScriptAccessible for methods that can be called from within JavaScript via post API call. It uses reflection
+
+Build a health check page that checks all databases for connectivity
+
+Create ScheduledTaskStatistics that stores information about a scheduled task when it executes
+
+Create data validator project to use rules to validate stuff
+
+Take java operations that are complicated and put the sequence of actions into coordination classes
+
+To-do List Application: Create a simple web application that lets users create, update, delete, and complete tasks. Create scripting to attach a script to a task which the user can execute immediately or schedule it for later. Create kanban board for TODO tasks
+
+Arria social media mashup
+
+Create a tool that has many little utilities
+
+Create a ChatGPT interface, provide an OpenAI API key and call chatgpt
+
+Show SEO data about Arria
+
+Create webhook capability so that ArriaSCADA can make POST calls to external APIs to provide various data
+
+Move business logic from API methods to the appropriate projects, get the results and convert them to DTOs

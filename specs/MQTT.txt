@@ -1,0 +1,11 @@
+Make MQTT payload to be JSON
+
+create class TagHistorianUpdater in the tags project. This uses CoreTagDataDAO. It subscribes to MQTT's all topics. When it receives a payload, it stores it to the historian
+
+create TagRealtimeDataUpdater class in the tag project. It subscribes to MQTT's all topics to be notified of new data and updates the realtime tag table
+
+create TagRealtimeDataCacheUpdater class in the tag project. It subscribes to MQTT's all topics to be notified of new data and updates the tag cache. See how I can efficiently add a new tag to a TreeNode
+
+Trigger functions when SCADA receives certain data from MQTT. Create a rules engine and a GUI rules configurator
+
+Find all places where we save, update or delete anything from the tag data latest DAO and use MQTT there to notify the tag cache

@@ -1,0 +1,153 @@
+Dashboard that has only latest tag data
+
+Use DeepLearning4J to find ticket anomalies like tickets that are released before they are done or released but are not done, etc.
+
+Simulate ticket data updates
+
+Show list of metrics we have and allow user to devise KPIs using existing metrics and applying formulas and/or logic to those metrics in order to devise KPIs
+
+In the trends charts find which tickets contributed the most to the displayed values or the percentage diffs from the previous month
+
+Forecast future delays in time to completion or time to release based on ticket types, priorities, labels, story points and TD points
+
+Monitor ticket KPIs and make suggestions accordingly
+
+Use machine learning to analyze ticket data
+
+Use signal processing on ticket data
+
+A proportional controller checks the new ticket status that came from MQTT and compares it to the timestamp of the last status. If the time diff is greater or equal to a setpoint then create an alarm for it. The setpoint and config for this may depend on the kind of status we receive. The integral control accumulates time deviations. If the cumulative deviations keep rising then create alarm to say that things are getting worse. The derivative control anticipates future trends. Change alarms to be able to be attached to tag groups
+
+If we have a set of tickets and we want to minimize the time to completion then we can take into account the tickets types, priorities, labels, story points, TD points and status history to decide (as new statuses come in) reprioritisation of tickets in order to achieve overall minimisation of the deviation from the desired time to completion
+
+Go through all tabs and see where I can show filters and gauges. 1) pie chart of: number of ticket tags, number of KPI-related tags, other. (Include percentage of total) 2) pie chart of number of tickets by type. (Include percentage of total) 3) pie chart of number of tickets by priority. (Include percentage of total) 4) pie chart of number of tickets by label (testing, frontend, backend, other) (include percentage of total). 5) gauge for number of tag properties. 6) gauge for number of tag context details. 7) gauge for number of historian records. 8) export all tickets latest data to CSV/JSON. 9) barchart of number of tickets by status. 10) barchart that shows number of tickets based on type/priority/label (to compare the types/priorities/labels with each other) in a date range. The number of bars per chart segment equals the number of types/priorities/labels selected. 11) show gauge for number of tickets that were reopened after they were DONE. Filter by type/priority/label. 12) show gauges for number of tickets that were sent back to assigned or TODO after they were marked as "code review" or "in QA branch". Filter by type/priority/label. 13) Examine how ticket priority influences resolution time. For instance, are high-priority tickets resolved faster than low-priority ones. 14)  barchart of amount of time tickets spend during development, during review, during testing, during completion (awaiting merge + in QA master). Filter by type/priority/label. Create target KPIs and compare with them. 15) Use regression or machine learning models that incorporate ticket type, priority, labels, and historical cycle times to forecast how long new tickets will take to resolve. 16) Build a classifier to predict which tickets are likely to breach deadlines (taken from our target KPIs) based on their attributes and status transition patterns. 17) Track how changes in ticket volume correlate with average cycle times or backlogs. 18) Evaluate whether reassignments correlate with longer resolution times or higher reopen rates. 19) Create heatmaps that display ticket creation, status transitions, or resolution times by time of day or day of the week. 20) line area chart of number of tickets completed/released/any-status every day/week/month. Filter by type/priority/label in a date range. 21) line area chart of number of tickets that had each of the 12/13 statuses. Filter by type,priority/label in date range. 22) line area chart of average duration of the 12/13 statuses. Filter by type/priority/label and date range. 23) create target KPIs for everything. 24) create sequential line chart of a selected ticket status (within a date range) to show the number of tickets that had the selected status from 1 month to the next. Filter by type, priority, label. 25) show a LED gauge in barcharts of the total number of tickets returned, and a 2nd date range for comparison values, and target values. 26) Show line chart on top of barcharts of moving average with moving average window being 5% of the date range. 27) In the general ticket analytics page show gauges with the minimum/maximum/average/median time to production, the time to release target, minimum/maximum/average/median time to DONE, time to done target, number of released tickets speedometer. 28) show table of tickets that have been open (and are still open) for at least a specified duration. 29) Show table or chart of sorted average/median time-to-release by issue type, priority, labels. 30) Show table of 20 tickets with least/most time to release, time to done, least/most time they are assigned/TODO/review/QA/awaiting-merge
+
+For all DONE and released tickets create tags "*/is-done", "*/done-datetime", "*/is-released" and "*/release-datetime"
+
+Create new ticket-metrics folder and inside put tags "minimum-time-to-done", "maximun-time-to-done", "average-time-to-done", "median-time-to-done", "minimum-time-to-release", "maximum-time-to-release", "average-time-to-release", "median-time-to-release", "number-of-done-tickets", "number-of-released-tickets'. These will be calculated every time we find out that a ticket has been completed or released. Use "incremental average" to calculate new averages and use only these metrics to calculate minimum and maximum. Don't use the historian.
+Incremental average = instead of recalculating from scratch every time a ticket is added or updated, the formula for maintaining a running average is:
+newAverage = oldAverage + (newValue - oldAverage)/currentNumberOfTickets
+
+In the tickets table make the ticket names to be clickable and open the JIRA page I'm a new tab
+
+Create metric interface like google analytics to be show all metrics and KPIs, project selector, date range and show line chart of timeseries
+
+Create algorithms that detect anomalies, root-cause analysis and trends on the tickets CSV
+
+Show number of tickets or the ticket names (in a date range) whose selected status exceeds a preset duration KPI. Download a CSV with the ticket names. Show tickets whose creation-to-release, creation-to-done, etc. exceeds a preset KPI
+
+Use linear prediction function to predict ticket statuses (e.g. to predict done-to-release duration in the next 30 days)
+
+In the ticket general tab show number of projects, number of distinct statuses, number of fix versions, number of ticket types, number of critical/high/medium/low priority tickets, number of backend/frontend/testing tickets (use pie charts), average number of story points, total story points, average number of TD points, total number of TD points, number of released tickets over all NSATs (using speedometer), percentage of done tickets that have been released. Move fix versions table to its own tab
+
+In the statistics tab show barchart of number of tickets in a date range with filters: project, statues, multiselect ticket types, multiselect priorities, multiselect labels. The result is always a single number over all tickets (use speedometer) and the percentage of the result over all tickets
+
+Split the release trends tab to DONE trends and release trends and separate the existing chart into 2: one for done and for one for release. In the DONE tab show also barchart of month-2-month number of done tickets in a date range with filters: ticket type, priority, label and a LED gauge of the total number of tickets returned, and a 2nd date range for comparison values, and target values. In the released tab show also barchart of month-2-month number of released tickets in a date range with filters: ticket type, priority, label and a LED gauge of the total number of tickets returned, and a 2nd date range for comparison values, and target values
+
+Show barchart of number of tickets that had the selected pairs of statuses within a date range. Filter by type, priority, label, combination
+
+In the fix version tab include filters: ticket types, priority, labels
+
+create sequential line chart of a selected ticket status (within a date range) to show the number of tickets that had the selected status from 1 month to the next. Filter by type, priority, label, combination. Show switch to show month-2-month or year-2-year
+
+Show line chart of moving average of all timestamps for selected date range and selected status, selected ticket types, selected priority, selected label with moving average window being 5% of the date range
+
+In all charts where we calculate averages, show a dropdown for average, median, variance, standard deviation
+
+Create a gauge for number of released tickets over number of NSATs
+
+Build a generic/abstract analytics engine. We want to do:
+--find minimum in a list
+--find maximum in a list
+--sum a list
+--average of a list
+--find percentage (x/y)
+--find diff in seconds between 2 datetimes
+--find diff in seconds between 2 datetimes applying office hours
+--take a list of objects and a supplier, group the list by that supplier and count the size of each group (e.g. list of ticket types and find the number of tickets per type or priorities or labels or fix versions)
+--take a list of pairs of datetimes and find the average of the diff between all pairs
+--find tickets that were done in a date range. Sort by datetime. Split the list into monthly lists. Take the average of each month partition. Show a line chart of the months and the averages (take a list of datetimes, sort them, split them by month and find the average of each month partition)
+--find the tickets that have status1 and status2 in core.tag_data in a date range. Sort the list by the datetime of status2. Group the results by month within the date range. Find the diff between the 2 statuses datetimes for each month partition. Find the average of all month partitions. Show barchart of months and the averages
+
+for release trends chart separate the charts into 2: one for done and for one for release. Create barchart with 3 series where we show the monthly sequence of each X-to-Y (for X-to-done) and show them in month sequence based on the date range
+
+You can use the Statistical Prediction function to make future value predictions by applying the Fast Fourier Transform (FFT) on time-series signals
+
+https://support.flow-software.com/hc/en-us/sections/360003512259-Creating-Charts-in-Flow
+
+Cumulative flow diagram or area line chart
+
+Show gauge number and percentage of each type/priority/label/combination of tickets
+
+Create a gauge that shows numbers of tickets based on filters: current status, type, priorities, label
+
+Show barchart of number of tickets that had the selected statuses within a date range. Filter by type, priority, label, combination
+
+create sequential line chart of a selected ticket status (within a date range) to show the number of tickets that had the selected status from 1 month to the next. Filter by type, priority, label, combination
+
+calculate the average, median, variance, standard deviation of DONE/release times using the created and DONE/release timestamps
+
+think about all gauges/charts we have, but instead of averages, use medians
+
+show table of tickets that have been open (and are still open) for at least a specified duration
+
+find correlations between ticket attributes (e.g., type/priority/label vs. DONE time)
+
+Take tickets created within a date range and show the flow barchart of 12/13 statuses for those tickets to see the diff in status flow. Show percentage diff from status to status. Show line chart of the duration of each status in the flow/sequence
+
+For a date range show percentage of time that was spent on active statuses (e.g. in progress, assigned, review, QA (branch), etc.) over total time of the selected date range. Also show binary chart where the values of 1 represent active statuses in the flow and 0 represent inactive statuses. Also show total time spent on active statuses and total time spent on inactive statuses and ratio of total active over total inactive
+
+Create KPIs for tickets like "the average time to completion per ticket should be <=5 days" or "the average time from completion to release should be <=5 days" and then visualize these KPIs based on existing ticket metrics
+
+Create OKRs like "objective = decrease time from TODO to release, with results: KPI1 = the average time from completion to release should be <=5 days, KPI2 = the average time from TODO to completion should be <=5 days
+
+record the number of times each status appeared in the ticket. This is calculated on demand. Show it in the tickets page table. Show a barchart of the average number of times (per ticket) each status is assigned to tickets. Create a ratio of the number of times of a status over the number of tickets to show which statuses keep coming back per ticket
+
+Use studio to create report for the average durations of all statuses. "the average duration of the ready for QA status has increased/decreased on average compared to the-preset/last-year.
+in the last 4 weeks the average duration for ready for QA has increased by 50% compared to last year"
+
+Weighted Priority Score: Assign numerical weights to priorities (e.g., High = 3, Medium = 2, Low = 1) and compute a weighted sum (or average) of story points. Also group by year/month, issue type and fix version
+
+Use cross correlation function
+
+Metrics:
+--histogram that shows the minimum/maximum/average/median time from (all) tickets status1 to status2, status 2 to status 3, etc.
+--histogram that shows the time from (only one) ticket status1 to status2, status 2 to status 3, etc.
+--number of tickets created per year/month on average and for selected date range histogram, filter by issue type, priority, labels
+--number of tickets per combination of issue type, priority, labels
+--number of tickets per combination of current status
+--line chart of completion dates
+--line chart of creation dates
+--line chart of release dates
+--number of "status1" per year/month/week on average and for selected date range
+--cumulative chart of story points, TD points or sum of both
+--number of story/TD points or sum of both completed per year/month/week/day on average and for selected date range
+--number of story/TD points or sum of both released per year/month/week/day on average and for selected date range histogram
+--number of story points, TD points or sum of both
+--number of story points, TD points or sum of both per combination of issue type, priority, label, status
+--number of story points, TD points or sum of both resolved per year/month/week/day on average and for selected date range
+--number of story points, TD points or sum of both released per year/month/week/day on average and for selected date range
+--backlog count per year/month/week/day on average and for selected date range
+--backlog count per combination of issue types, priority, label per year/month/week/day on average and for selected date range
+--time from assignment to review per year/month/week/day on average and for selected date range, filter by issue type, priorities, label
+
+Create some default statistical and analytics functions that can be applied to tag history
+
+https://sonarcloud.io/web_api/api/measures?deprecated=false
+
+https://learn.microsoft.com/en-us/rest/api/azure/devops/pipelines/runs/list?view=azure-devops-rest-7.2
+
+https://learn.microsoft.com/en-us/rest/api/azure/devops/tokens/pats/update?view=azure-devops-rest-7.2&tabs=HTTP
+
+https://learn.microsoft.com/en-us/rest/api/azure/devops/wiki/pages/create-or-update?view=azure-devops-rest-7.2&tabs=HTTP
+
+Show git metrics taken from azure DevOps
+
+sonarcloud API key name:arriascada-v001
+02155b6455e6dc684134afb1e3a659d263181e58
+
+connect to MixPanel API
+
+https://www.jqueryscript.net/chart-graph/
+
+Show in the home page the total number of quarantined records from all store and forward engines, total number of websocket connections, total number of scheduled activities

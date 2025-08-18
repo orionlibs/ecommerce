@@ -1,0 +1,1319 @@
+```sql
+SELECT * FROM ticket_view WHERE IssueType = 'Bug';
+```
+
+The view definition might look like this:
+
+```sql
+CREATE OR REPLACE VIEW ticket_view AS
+SELECT 
+  td.tagID,
+  MIN(td.tagPath) AS ticketTagPath,
+  MAX(CASE 
+        WHEN td.tagPath LIKE '%/projects/NSAT/%/type' 
+          THEN td.stringValue 
+      END) AS issueType,
+  MAX(CASE 
+        WHEN td.tagPath LIKE '%/projects/NSAT/%/priority' 
+          THEN td.stringValue 
+      END) AS priority
+FROM core.tag_data td
+WHERE td.tagPath LIKE '[core]/studio/issues/projects/NSAT/tickets/%'
+GROUP BY td.tagID;
+```
+
+Yes, you can achieve this using Spring AOP. The idea is to define an aspect that intercepts calls to `DAO.saveModel()` and then notifies `DAOMonitor`.  
+```java
+import org.springframework.stereotype.Component;
+@Component
+public class DAO {
+    public void saveModel(Object model) {
+        System.out.println("Saving model: " + model);
+        // Actual save logic
+    }
+}
+```
+```java
+import org.springframework.stereotype.Component;
+@Component
+public class DAOMonitor {
+    public void onSaveModel(Object model) {
+        System.out.println("DAOMonitor notified: Model saved - " + model);
+    }
+}
+```
+```java
+import org.aspectj.lang.annotation.After;
+import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.annotation.Pointcut;
+import org.springframework.stereotype.Component;
+@Aspect
+@Component
+public class DAOMonitorAspect {
+    private final DAOMonitor daoMonitor;
+
+    public DAOMonitorAspect(DAOMonitor daoMonitor) {
+        this.daoMonitor = daoMonitor;
+    }
+
+    @Pointcut("execution(* DAO.saveModel(..))")
+    public void saveModelExecution() {}
+
+    @After("saveModelExecution()")
+    public void afterSaveModel(org.aspectj.lang.JoinPoint joinPoint) {
+        Object[] args = joinPoint.getArgs();
+        if (args.length > 0) {
+            daoMonitor.onSaveModel(args[0]);
+        }
+    }
+}
+```
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-aop</artifactId>
+</dependency>
+```
+
+
+
+Here’s a list of important metrics and types of statistical analyses you can perform using JIRA data for your software project:
+
+1. **Cycle Time & Lead Time**  
+   - *Cycle Time:* Average duration from when work starts on an issue until it’s completed.  
+   - *Lead Time:* Total time from issue creation to completion.  
+   These metrics help identify bottlenecks and assess overall efficiency.
+
+2. **Velocity**  
+   - Measures the amount of work (often in story points or issue count) completed during each sprint.  
+   - Useful for forecasting future sprint capacities.
+
+3. **Burn-Down & Burn-Up Charts**  
+   - *Burn-Down:* Tracks the remaining work in a sprint over time.  
+   - *Burn-Up:* Shows progress toward a goal and can include scope changes.  
+   Both charts help monitor sprint progress and adjust planning accordingly.
+
+4. **Cumulative Flow Diagram (CFD)**  
+   - Visualizes the distribution of work across different workflow states (e.g., To Do, In Progress, Done).  
+   - Highlights potential process bottlenecks and overall process stability.
+
+5. **Issue Throughput**  
+   - Counts the number of issues resolved over a specific period.  
+   - Provides insight into team productivity and work capacity.
+
+6. **Work In Progress (WIP)**  
+   - Tracks the number of issues actively being worked on at any given time.  
+   - Helps manage resource allocation and avoid overloading team members.
+
+7. **Estimation Accuracy**  
+   - Compares initial estimates (e.g., story points or time estimates) with actual time spent or effort required.  
+   - Helps refine future sprint planning and improve estimation practices.
+
+8. **Defect Density & Reopen Rates**  
+   - *Defect Density:* Number of defects relative to the volume of work (e.g., per sprint or per module).  
+   - *Reopen Rates:* Frequency of issues being reopened after they were marked as resolved.  
+   These metrics are key for assessing product quality and process effectiveness.
+
+9. **Sprint Predictability**  
+   - Analyzes planned vs. completed work (e.g., story points) within a sprint.  
+   - Provides feedback on planning accuracy and helps adjust future sprint goals.
+
+10. **Epic & Release Progress Tracking**  
+    - Monitors progress on larger initiatives by aggregating related issues under epics or versions.  
+    - Essential for high-level roadmap tracking and milestone management.
+
+11. **Workload Distribution**  
+    - Reviews how tasks are assigned across team members.  
+    - Ensures a balanced workload and identifies potential resource constraints.
+
+12. **Trend Analysis & Time Series Analysis**  
+    - Uses historical data (e.g., cycle times, velocity) to identify trends over multiple sprints.  
+    - Supports predictive analytics and continuous improvement initiatives.
+
+13. **Control Charts**  
+    - Visualizes process stability by plotting cycle times or lead times over time with control limits.  
+    - Helps detect variations and opportunities for process adjustments.
+
+14. **Backlog Aging**  
+    - Measures how long issues remain in the backlog before being addressed.  
+    - Indicates whether the backlog is growing and if prioritization or process changes are needed.
+
+15. **Pareto Analysis**  
+    - Identifies the “vital few” issues (e.g., recurring blockers or defects) that contribute most to delays or quality issues.  
+    - Assists in focusing improvement efforts on high-impact areas.
+
+
+Below is a deeper look into both the Cumulative Flow Diagram (CFD) and Control Charts, including how they’re constructed, interpreted, and used to drive improvements in your software development process.
+
+---
+
+### Cumulative Flow Diagram (CFD)
+
+**Overview:**  
+A CFD is a visual tool that represents the flow of work across different stages (or statuses) over time. It’s typically displayed as a stacked area chart where each “layer” corresponds to a workflow state (e.g., Backlog, In Progress, Testing, Done).
+
+**Key Features:**
+
+- **Visualization of Workflow:**  
+  - **X-Axis (Time):** Shows a continuous timeline (days, weeks, sprints).  
+  - **Y-Axis (Work Items):** Represents the cumulative count of issues.  
+  - **Colored Layers:** Each color corresponds to a distinct status in your workflow.
+  
+- **Insight into Process Health:**  
+  - **Identifying Bottlenecks:** A widening band in a particular status (for example, “In Progress”) can signal a bottleneck or work piling up.
+  - **Monitoring Flow:** By tracking how work moves from one state to another, you can determine if work is consistently flowing or if certain stages cause delays.
+  - **Work in Progress (WIP) Management:** Helps you observe if the number of tasks in progress is within acceptable limits, supporting decisions around enforcing or adjusting WIP limits.
+
+- **Practical Uses:**  
+  - **Continuous Improvement:** Regularly reviewing the CFD enables teams to spot trends that might indicate process inefficiencies or capacity issues.  
+  - **Forecasting Completion:** With a stable flow, teams can better predict when remaining tasks will likely be completed.
+
+**Integration in JIRA:**  
+JIRA Software offers built-in CFD reporting that can automatically generate these charts from your project’s workflow data. This allows you to monitor changes and trends in real time.
+
+---
+
+### Control Charts
+
+**Overview:**  
+Control Charts are statistical tools that help you understand the variability of your process over time. In the context of agile and software development, they’re most commonly used to track cycle times—measuring how long it takes for work items to move from one state (usually “In Progress”) to “Done.”
+
+**Key Features:**
+
+- **Chart Structure:**  
+  - **X-Axis (Time or Issue Completion Order):** Represents individual work items in the order they were completed.  
+  - **Y-Axis (Cycle Time):** Measures the time taken for each work item to complete its journey through the process.
+  
+- **Control Limits:**  
+  - **Mean (Average Cycle Time):** Indicates the central tendency of the process.  
+  - **Upper and Lower Control Limits:** Typically set at three standard deviations above and below the mean. Points outside these limits suggest anomalies or special-cause variations.
+  
+- **Insight into Process Stability:**  
+  - **Detecting Variability:** A tight clustering of cycle times within the control limits suggests a stable, predictable process.  
+  - **Identifying Outliers:** Items that fall outside the control limits may indicate issues, such as unexpected delays or process breakdowns, prompting further investigation.
+  - **Trend Analysis:** Observing trends (e.g., an upward trend in cycle times) can signal that the process is degrading, which might require corrective action.
+
+**Practical Uses:**  
+- **Process Improvement:** By regularly analyzing the control chart, teams can gauge the effectiveness of process changes or identify areas for further optimization.  
+- **Predictability & Forecasting:** A stable control chart supports more reliable predictions for future work item completions, helping with planning and resource allocation.
+
+**Integration in JIRA:**  
+Many agile tools, including JIRA Software, include features to generate control charts. These charts provide real-time feedback on cycle time performance and can be customized to reflect your team’s unique workflow stages.
+
+---
+
+**Summary:**  
+- **CFD** is excellent for visualizing the overall flow of work and identifying bottlenecks or accumulation in certain workflow stages, making it easier to manage WIP and forecast completion dates.
+- **Control Charts** focus on the stability and predictability of the process, using statistical control limits to flag anomalies and drive discussions on process improvement.
+
+Both tools are invaluable for continuous improvement, allowing teams to make data-driven decisions to enhance productivity and process efficiency in their software projects.
+
+
+When you have a rich dataset from JIRA, you can apply a variety of statistical algorithms and techniques to extract insights, predict trends, and drive process improvements. Here are some key algorithms and how they might be applied:
+
+1. **Time Series Analysis & Forecasting**  
+   - **ARIMA/Holt-Winters/Exponential Smoothing:**  
+     Use these methods to forecast future sprint metrics (e.g., velocity, throughput, cycle time) based on historical trends.  
+   - **Prophet:**  
+     A robust forecasting tool (developed by Facebook) that can handle seasonality and trends, useful for predicting project milestones or release dates.
+
+2. **Regression Analysis**  
+   - **Linear Regression:**  
+     Model relationships between continuous variables (e.g., estimating cycle time based on issue complexity or team workload).  
+   - **Multiple Regression:**  
+     Incorporate multiple factors (like issue type, team size, or time of year) to predict performance metrics.
+   - **Logistic Regression:**  
+     When your outcome is binary (for example, predicting whether an issue will be reopened), logistic regression can be applied.
+
+3. **Clustering Techniques**  
+   - **K-Means or Hierarchical Clustering:**  
+     Group similar issues or sprints together based on attributes like duration, complexity, or defect density. This can help identify common patterns or areas for process improvement.
+   - **DBSCAN:**  
+     Useful for discovering clusters of issues that don’t necessarily fit into neat, spherical clusters, especially when outliers are present.
+
+4. **Anomaly Detection & Outlier Analysis**  
+   - **Z-Score Analysis/Interquartile Range (IQR):**  
+     Identify issues or sprints with unusually high cycle times or defect counts.  
+   - **CUSUM (Cumulative Sum Control Chart):**  
+     Detect small shifts in process performance over time, which might not be evident in traditional control charts.
+
+5. **Control Charts & Statistical Process Control (SPC)**  
+   - **Shewhart Control Charts:**  
+     Monitor the stability of processes (like cycle time) by plotting data with upper and lower control limits.  
+   - **EWMA (Exponentially Weighted Moving Average):**  
+     More sensitive to small shifts in the process, providing early warning signals for process deterioration.
+
+6. **Survival Analysis**  
+   - **Kaplan-Meier Estimator:**  
+     Estimate the probability that an issue will be resolved within a given timeframe, which is helpful for understanding and managing backlog aging.
+   - **Cox Proportional Hazards Model:**  
+     Analyze the effect of multiple factors on the time until an issue is closed, offering deeper insights into process delays.
+
+7. **Monte Carlo Simulations**  
+   - **Risk and Uncertainty Modeling:**  
+     Use random sampling to simulate project outcomes (like predicting release dates or assessing the impact of variability in cycle times) and quantify the uncertainty inherent in your estimates.
+
+8. **Predictive Modeling & Machine Learning**  
+   - **Decision Trees, Random Forests, or Gradient Boosting Machines:**  
+     Build models to predict outcomes such as ticket resolution times, likelihood of defect introduction, or even team performance based on historical data.
+   - **Neural Networks:**  
+     For more complex patterns in larger datasets, neural networks can be applied to predict various performance metrics.
+
+9. **Text Analytics & Natural Language Processing (NLP)**  
+   - **Topic Modeling (e.g., LDA):**  
+     Analyze the content of issue descriptions and comments to discover recurring themes or underlying issues.
+   - **Sentiment Analysis:**  
+     Gauge team morale or customer satisfaction by analyzing the sentiment of comments and feedback in JIRA issues.
+
+10. **Pareto Analysis**  
+    - **80/20 Rule Analysis:**  
+      Identify the small subset of issues (or types of issues) that contribute to the majority of delays or defects, enabling targeted improvements.
+
+Each of these algorithms can be tailored to answer specific questions:
+- **How predictable is our process?** (Time series forecasting, control charts)
+- **Which factors contribute most to delays?** (Regression analysis, survival analysis)
+- **Are there patterns in the types of issues causing reopens?** (Clustering, text analytics)
+- **What is our risk profile for future sprints?** (Monte Carlo simulations)
+
+By applying these statistical techniques to your JIRA data, you can make more informed decisions, improve process efficiency, and ultimately enhance the quality of your software development process.
+
+Using Java 21, you can build a machine learning application that ingests JIRA data from a CSV file, preprocesses it, and trains models to predict outcomes or classify issues. Here’s a high-level approach along with some practical pointers:
+
+---
+
+### 1. Data Ingestion
+
+**Reading the CSV:**  
+You can use libraries like [Apache Commons CSV](https://commons.apache.org/proper/commons-csv/) or [OpenCSV](http://opencsv.sourceforge.net/) to read and parse the CSV file. Java 21’s improved APIs and records can help make the code cleaner.
+
+*Example using Apache Commons CSV:*
+
+```java
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVRecord;
+import java.io.FileReader;
+import java.io.Reader;
+
+public class CSVReaderExample {
+    public void readCsv(String filePath) throws Exception {
+        try (Reader in = new FileReader(filePath)) {
+            Iterable<CSVRecord> records = CSVFormat.DEFAULT
+                    .withFirstRecordAsHeader()
+                    .parse(in);
+            for (CSVRecord record : records) {
+                String issueKey = record.get("IssueKey");
+                String status = record.get("Status");
+                String cycleTime = record.get("CycleTime");
+                // Process the data as needed...
+            }
+        }
+    }
+}
+```
+
+---
+
+### 2. Data Preprocessing and Feature Engineering
+
+**Clean and Transform:**  
+- **Missing Values:** Handle missing data by imputing values or removing records.  
+- **Feature Extraction:** Convert categorical data (e.g., issue status, priority) into numerical representations using one-hot encoding or label encoding.  
+- **Normalization/Scaling:** Depending on the model, you may need to scale numeric features.
+
+Using Java’s Stream API or libraries like [Apache Commons Math](https://commons.apache.org/proper/commons-math/) can facilitate some of these steps.
+
+---
+
+### 3. Choosing a Machine Learning Library
+
+Several Java ML libraries can be integrated into your project:
+
+- **Weka:** A mature library offering a wide range of algorithms (e.g., decision trees, random forests, SVMs) and built-in data preprocessing.  
+- **Smile:** A modern, fast, and comprehensive machine learning library for Java/Scala.  
+- **Deeplearning4j:** If you plan on using deep learning, this is a solid choice.
+
+For many classic ML tasks (like regression or classification), Weka or Smile might be more straightforward.
+
+---
+
+### 4. Building and Training a Model
+
+**Example Using Weka:**  
+Weka provides APIs to load CSV data, build classifiers, and evaluate them.
+
+*Sample code snippet for a classifier:*
+
+```java
+import weka.classifiers.Classifier;
+import weka.classifiers.trees.RandomForest;
+import weka.core.Instances;
+import weka.core.converters.CSVLoader;
+
+import java.io.File;
+
+public class WekaModelExample {
+    public void trainModel(String csvFilePath) throws Exception {
+        // Load CSV data
+        CSVLoader loader = new CSVLoader();
+        loader.setSource(new File(csvFilePath));
+        Instances data = loader.getDataSet();
+
+        // Set the class attribute (e.g., if predicting issue resolution outcome)
+        data.setClassIndex(data.numAttributes() - 1); 
+
+        // Build the classifier (e.g., RandomForest)
+        Classifier classifier = new RandomForest();
+        classifier.buildClassifier(data);
+
+        // Optionally, evaluate the classifier using cross-validation
+        // ...
+    }
+}
+```
+
+In this example, replace the class attribute with the column you intend to predict (such as "IssueReopened" or "ResolutionTime").
+
+**Example Using Smile:**  
+Smile’s API is more “code-centric” and may require transforming your CSV data into a suitable data structure (e.g., double arrays). Smile supports many algorithms, including regression, classification, clustering, and more.
+
+---
+
+### 5. Model Evaluation and Prediction
+
+**Splitting the Data:**  
+Split your dataset into training and testing sets (e.g., 80/20 split). Weka and Smile both offer utilities or you can code the split yourself using Java collections.
+
+**Metrics:**  
+Depending on your task, evaluate your model with metrics like accuracy, precision, recall (for classification) or mean squared error (for regression).
+
+---
+
+### 6. Java 21 Enhancements
+
+- **Records:** Use Java records to define immutable data holders for each CSV row.  
+- **Pattern Matching:** Simplify type checks during data transformation.  
+- **Concurrency Improvements:** Leverage parallel streams if preprocessing large datasets.
+
+*Example using a record for a JIRA issue:*
+
+```java
+public record JiraIssue(String issueKey, String status, double cycleTime) {}
+```
+
+You can map each CSV row to a `JiraIssue` record, which makes your data transformations clearer and less error-prone.
+
+---
+
+### Summary
+
+1. **Read and Parse CSV Data:** Use libraries like Apache Commons CSV.
+2. **Preprocess the Data:** Handle missing values, encode categorical features, and scale numeric features.
+3. **Select an ML Library:** Options include Weka, Smile, or Deeplearning4j based on your needs.
+4. **Build and Train Models:** Implement algorithms (e.g., RandomForest for classification or linear regression for prediction).
+5. **Evaluate and Predict:** Use appropriate metrics to validate your model.
+6. **Utilize Java 21 Features:** Leverage records, pattern matching, and parallel streams for cleaner and more efficient code.
+
+By following these steps, you can turn raw JIRA data from a CSV into actionable insights using machine learning in Java 21
+
+
+
+Your UNS tag system for JIRA tickets will be valuable for both project managers and software engineers in multiple ways. By structuring ticket data as hierarchical tags (e.g., `MyProject/tickets/ticket1/story-points`), you create a real-time, queryable data model that integrates seamlessly with dashboards, alerting systems, and analytics tools. Here’s how different roles can benefit:
+
+### **For Project Managers**  
+1. **Real-Time Tracking of Work Progress**  
+   - Tags like `MyProject/tickets/ticket1/status` allow instant visibility into ticket statuses without manually checking JIRA.  
+   - Aggregating data under `MyProject/tickets/*/status` enables project-wide status monitoring.  
+
+2. **Workload Balancing**  
+   - Tags like `MyProject/developers/JohnDoe/open-tickets` help track the workload of individual developers, ensuring even distribution.  
+
+3. **Velocity and Burndown Analysis**  
+   - Using `MyProject/tickets/*/story-points`, project managers can calculate team velocity over different sprints.  
+   - Connecting to Power BI or Grafana, they can generate burndown charts automatically.  
+
+4. **Bottleneck Detection**  
+   - Tags like `MyProject/tickets/*/time-in-status` highlight which tickets are stuck in "In Progress" or "Blocked," allowing proactive intervention.  
+
+5. **Sprint Planning & Forecasting**  
+   - Aggregating `story-points` and `completed-tickets` can predict delivery timelines based on past sprint performance.  
+
+### **For Software Engineers**  
+1. **Personal Workload Overview**  
+   - A tag like `MyProject/developers/JohnDoe/tickets` provides an instant view of assigned tickets and priorities.  
+
+2. **Cycle Time & Lead Time Analysis**  
+   - `MyProject/tickets/ticket1/time-to-completion` helps developers understand how long tasks take from creation to deployment, aiding continuous improvement.  
+
+3. **Automated Alerts & Notifications**  
+   - Engineers can subscribe to tags like `MyProject/tickets/ticket1/priority` and get notified when a critical ticket is assigned or escalated.  
+
+4. **Integration with CI/CD & DevOps**  
+   - `MyProject/tickets/ticket1/deployment-status` can track whether a fix is in production, helping with deployment verification.  
+
+5. **Root Cause Analysis for Delays**  
+   - By analyzing `MyProject/tickets/*/comments`, teams can identify patterns in blocked tickets and recurring challenges.  
+
+### **Unified Namespace Benefits**  
+- **Single Source of Truth:** Real-time access to all ticket data in one structured format.  
+- **Integration:** Easily connect to SCADA, Grafana, Power BI, or other tools.  
+- **Automation:** Trigger actions when certain conditions are met (e.g., notify when a high-priority bug remains open for too long).  
+
+Would you like me to suggest a database schema or MQTT topic structure to implement this?
+
+Here’s a list of operations you can perform on your **UNS tags** in your SCADA system for JIRA tickets:  
+
+### **1. CRUD Operations**  
+- **Create**: Add new tags dynamically when new tickets are created.  
+- **Read**: Retrieve current tag values for dashboards, reports, and alerts.  
+- **Update**: Modify existing tag values when ticket attributes change.  
+- **Delete**: Remove tags when tickets are closed or archived.  
+
+### **2. Subscription & Notifications**  
+- **Subscribe to Tags**: Engineers and managers can listen to changes in specific tags (e.g., `MyProject/tickets/ticket1/status`).  
+- **Trigger Alerts**: Notify stakeholders when conditions are met (e.g., `priority` changes to `high`).  
+
+### **3. Aggregation & Analytics**  
+- **Summarize Data**: Calculate total open tickets, average resolution time, or story points per sprint.  
+- **Trend Analysis**: Track how metrics (e.g., `tickets-completed-per-week`) change over time.  
+- **Heatmaps & Bottlenecks**: Identify which tickets or engineers experience the most delays.  
+
+### **4. Historical Data & Time-Series Analysis**  
+- **Store Tag History**: Save changes over time for retrospective analysis.  
+- **Compute Moving Averages**: Calculate average ticket resolution time over a rolling window.  
+- **Compare Sprints**: Track sprint-to-sprint performance.  
+
+### **5. Event Processing & Automation**  
+- **Trigger Workflows**: Auto-assign engineers when a high-priority bug is created.  
+- **Escalation Rules**: If a ticket remains in a blocked state for too long, escalate it.  
+- **Auto-Close Stale Tickets**: Detect inactivity and suggest closing or updating old tickets.  
+
+### **6. Access Control & Role-Based Filtering**  
+- **Role-Based Views**: Show different tag subsets based on user roles (e.g., developers see only their tickets).  
+- **Permission Management**: Restrict access to sensitive tags (e.g., `MyProject/tickets/security-issues`).  
+
+### **7. Data Export & Integration**  
+- **Export to BI Tools**: Feed tags into Power BI, Grafana, or Excel for reporting.  
+- **Integrate with Other Systems**: Sync tag updates with JIRA, Slack, or email alerts.  
+- **Generate Reports**: Automate report generation for weekly standups or retrospectives.  
+
+Would you like an implementation example for any of these operations?
+
+
+Below is an example Java 21 program that uses the built‐in HTTP client to call the JIRA REST API (v2) and download your ticket data in paginated chunks. In this example, you’ll need to replace the placeholder values (your JIRA domain, your username/email, and your API token) with your actual credentials. (In a production system you’d also want to use a proper JSON library like Jackson or Gson rather than the simple regex shown below.)
+
+> **Note:**  
+> - JIRA Cloud uses Basic Authentication with an API token.  
+> - The example uses the “search” endpoint with a simple JQL (in this case no filtering) so that it returns all issues.  
+> - For simplicity, we print out the raw JSON for each page of issues. You can expand this by parsing the JSON into Java objects.
+
+```java
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class JiraTicketDownloader {
+
+    // Replace with your JIRA instance information
+    private static final String JIRA_BASE_URL = "https://your-domain.atlassian.net";
+    private static final String JIRA_USERNAME = "your-email@example.com";
+    private static final String JIRA_API_TOKEN = "your-api-token";
+    
+    // How many issues to fetch per request (adjust as needed, max is often 100)
+    private static final int MAX_RESULTS = 50;
+
+    public static void main(String[] args) {
+        HttpClient client = HttpClient.newHttpClient();
+        
+        // Prepare the Basic Auth header
+        String authString = JIRA_USERNAME + ":" + JIRA_API_TOKEN;
+        String encodedAuth = Base64.getEncoder()
+                                   .encodeToString(authString.getBytes(StandardCharsets.UTF_8));
+        
+        int startAt = 0;
+        boolean morePages = true;
+
+        while (morePages) {
+            // Build the URL.
+            // Including "fields=*all" will request all available fields for each ticket.
+            String url = String.format("%s/rest/api/2/search?startAt=%d&maxResults=%d&fields=*all",
+                    JIRA_BASE_URL, startAt, MAX_RESULTS);
+            
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Authorization", "Basic " + encodedAuth)
+                    .header("Accept", "application/json")
+                    .build();
+
+            try {
+                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+                
+                if (response.statusCode() != 200) {
+                    System.err.println("Error fetching issues. HTTP status: " + response.statusCode());
+                    System.err.println(response.body());
+                    break;
+                }
+                
+                String responseBody = response.body();
+                System.out.println("Page starting at " + startAt + ":");
+                System.out.println(responseBody);
+                System.out.println("-----------------------------------------------------");
+                
+                // For demonstration, we extract pagination info using regex.
+                // In a real application, consider using a JSON parser library.
+                int total = extractIntValue(responseBody, "\"total\":\\s*(\\d+)");
+                int fetched = extractIntValue(responseBody, "\"maxResults\":\\s*(\\d+)");
+                int currentStartAt = extractIntValue(responseBody, "\"startAt\":\\s*(\\d+)");
+                
+                // Increment startAt for the next page.
+                startAt = currentStartAt + fetched;
+                
+                // If we have fetched all issues, exit the loop.
+                if (startAt >= total) {
+                    morePages = false;
+                }
+                
+            } catch (Exception e) {
+                e.printStackTrace();
+                break;
+            }
+        }
+    }
+
+    /**
+     * A simple helper to extract an integer value from JSON using a regex pattern.
+     * Note: For robust JSON processing, use a library like Jackson or Gson.
+     */
+    private static int extractIntValue(String json, String patternStr) {
+        Pattern pattern = Pattern.compile(patternStr);
+        Matcher matcher = pattern.matcher(json);
+        if (matcher.find()) {
+            return Integer.parseInt(matcher.group(1));
+        }
+        return 0;
+    }
+}
+```
+
+### How This Works
+
+1. **Authentication:**  
+   The program creates a Basic Authentication header by Base64-encoding the string `"username:apiToken"`.  
+   
+2. **Pagination:**  
+   The JIRA REST API’s search endpoint returns issues in pages. The program uses the `startAt` and `maxResults` parameters to page through all issues. It extracts the total number of issues from the JSON response (using a simple regex) and loops until all pages have been downloaded.
+
+3. **JSON Processing:**  
+   For brevity, the sample code prints out the raw JSON response. In a real-world scenario, you might want to parse the JSON into Java objects (using a library like Jackson or Gson) and then process or store the data as needed.
+
+### Running the Program
+
+1. Replace the placeholders (`JIRA_BASE_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN`) with your actual details.  
+2. Compile the program using Java 21 (if you’re using preview features, remember to add the appropriate flags):  
+   ```bash
+   javac JiraTicketDownloader.java
+   ```
+3. Run the program:  
+   ```bash
+   java JiraTicketDownloader
+   ```
+
+This example should give you a good starting point for integrating with the JIRA API using Java 21. You can expand upon it to add error handling, persistence (e.g., saving to a file or database), or more advanced JSON processing as needed.
+
+
+Below are the steps you can follow to generate API credentials (an API token) for accessing the JIRA Cloud API:
+
+1. **Log In to Your Atlassian Account:**  
+   - Go to [Atlassian's API token management page](https://id.atlassian.com/manage/api-tokens).  
+   - Sign in with the email address associated with your JIRA account.
+
+2. **Create a New API Token:**  
+   - Click the **"Create API token"** button.  
+   - In the dialog that appears, enter a meaningful label (e.g., "JIRA API Access for Java App") to help you remember what the token is used for.
+
+3. **Generate and Copy the Token:**  
+   - Click **"Create"** after entering the label.  
+   - Once the token is generated, **copy it immediately**. For security reasons, you won’t be able to view the token again after closing the dialog.
+
+4. **Store the Token Securely:**  
+   - Save the token in a secure location (like a password manager or environment variable) so you can use it in your API requests.
+   
+5. **Use the Token with Your API Requests:**  
+   - When making API calls to JIRA, use Basic Authentication where your username is your Atlassian account email address and your password is the API token you just generated.
+
+**Note:**  
+- This process applies to JIRA Cloud. If you’re using a self-hosted JIRA Server instance, the authentication mechanism might differ (e.g., you may need to use other methods such as session-based authentication or OAuth).
+- Always follow your organization's security best practices when handling and storing API credentials.
+
+Following these steps will allow you to generate the credentials needed to authenticate and interact with the JIRA API securely.
+
+
+Below is an example Java 21 program that uses the built‐in HTTP client to connect to your Grafana instance via its REST API. This sample demonstrates how to download several types of data—dashboards, data sources, and alerts—but you can extend it to retrieve other endpoints as needed.
+
+Before running the code, make sure to:
+
+- Replace the placeholder values (`GRAFANA_BASE_URL` and `API_KEY`) with your actual Grafana instance URL and API key.
+- Generate an API key from your Grafana instance (see the steps below).
+
+### Java 21 Program
+
+```java
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
+public class GrafanaDataDownloader {
+
+    // Replace with your Grafana instance URL (e.g., "https://your-grafana-instance.com")
+    private static final String GRAFANA_BASE_URL = "https://your-grafana-instance.com";
+    
+    // Replace with your Grafana API key
+    private static final String API_KEY = "your-api-key-here";
+    
+    private static final HttpClient client = HttpClient.newHttpClient();
+
+    public static void main(String[] args) {
+        // Download dashboards
+        String dashboards = fetchData("/api/search?type=dash-db");
+        System.out.println("Dashboards:");
+        System.out.println(dashboards);
+        System.out.println("-----------------------------------------------------");
+
+        // Download data sources
+        String datasources = fetchData("/api/datasources");
+        System.out.println("Data Sources:");
+        System.out.println(datasources);
+        System.out.println("-----------------------------------------------------");
+
+        // Download alerts
+        String alerts = fetchData("/api/alerts");
+        System.out.println("Alerts:");
+        System.out.println(alerts);
+        System.out.println("-----------------------------------------------------");
+
+        // You can add additional endpoints here, for example:
+        // String folders = fetchData("/api/folders");
+        // System.out.println("Folders:");
+        // System.out.println(folders);
+    }
+
+    /**
+     * Fetches data from a given Grafana API endpoint.
+     *
+     * @param endpoint the Grafana API endpoint (e.g., "/api/datasources")
+     * @return the response body as a String
+     */
+    private static String fetchData(String endpoint) {
+        String url = GRAFANA_BASE_URL + endpoint;
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + API_KEY)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                System.err.println("Error fetching data from " + endpoint + ". HTTP status: " + response.statusCode());
+                System.err.println("Response: " + response.body());
+                return "";
+            }
+            return response.body();
+        } catch (Exception e) {
+            System.err.println("Exception occurred while fetching data from " + endpoint);
+            e.printStackTrace();
+            return "";
+        }
+    }
+}
+```
+
+### Explanation
+
+1. **Configuration:**  
+   - **GRAFANA_BASE_URL:** Your Grafana instance URL (for Grafana Cloud or self-hosted).
+   - **API_KEY:** Your Grafana API key used for authentication.  
+   The program uses the `Authorization` header with the Bearer token for API requests.
+
+2. **Fetching Data:**  
+   The `fetchData` method builds and sends a GET request to the specified API endpoint. If the HTTP status code is not 200 (OK), an error is printed.
+
+3. **Endpoints Used:**  
+   - **Dashboards:** `GET /api/search?type=dash-db` retrieves a list of dashboards.  
+   - **Data Sources:** `GET /api/datasources` retrieves all configured data sources.  
+   - **Alerts:** `GET /api/alerts` retrieves alerts defined in Grafana.  
+   You can add or modify endpoints as needed for your project.
+
+4. **Running the Program:**  
+   - Replace the placeholders with your actual Grafana URL and API key.
+   - Compile with:
+     ```bash
+     javac GrafanaDataDownloader.java
+     ```
+   - Run with:
+     ```bash
+     java GrafanaDataDownloader
+     ```
+
+---
+
+### Steps to Generate a Grafana API Key
+
+1. **Log In to Grafana:**  
+   Open your Grafana instance in your web browser and log in with an account that has the necessary administrative privileges.
+
+2. **Access API Keys Settings:**  
+   - In Grafana Cloud, click on your profile (or the gear icon) and select **"API Keys"** from the configuration menu.
+   - For self-hosted Grafana, go to **Configuration** (gear icon) → **API Keys**.
+
+3. **Create a New API Key:**  
+   - Click the **"Add API Key"** or **"Create API Key"** button.
+   - Enter a meaningful **Name** (for example, "Java Data Downloader").
+   - Select a **Role**. For read-only access, choose **Viewer**. For broader access, you might select **Editor** or **Admin** as needed.
+   - Optionally, set an **Expiration** date.
+
+4. **Generate and Copy the Key:**  
+   - Click **"Create API Key"**.
+   - **Copy the generated key immediately.** You won’t be able to see it again after closing this dialog.
+
+5. **Store the Key Securely:**  
+   Save the API key in a secure location (such as an environment variable or a secrets manager) and update your Java code with this key.
+
+By following these steps and using the provided Java program, you’ll be able to connect to your Grafana account using the API and download key pieces of data related to your project.
+
+
+Below are the steps you need to follow to generate API credentials (an API key) for accessing the Grafana API:
+
+1. **Log In to Your Grafana Instance:**  
+   Open your Grafana dashboard in your web browser and sign in with an account that has administrative privileges.
+
+2. **Access the API Keys Section:**  
+   - For **Grafana Cloud:**  
+     Click your profile icon or the gear icon, then select **"API Keys"** from the menu.  
+   - For **Self-Hosted Grafana:**  
+     Click on the **Configuration (gear icon)** in the left sidebar, then select **"API Keys"**.
+
+3. **Create a New API Key:**  
+   - Click the **"Add API Key"** or **"Create API Key"** button.
+   - Provide a descriptive **Name** for the key (e.g., "Java Data Downloader").
+   - Select the appropriate **Role** for the key. For read-only access, choose **Viewer**; for more privileges, you might select **Editor** or **Admin**.
+   - Optionally, set an **Expiration** date if you want the key to expire automatically.
+
+4. **Generate and Copy the API Key:**  
+   - Click **"Create API Key"**.  
+   - Once the key is generated, **copy it immediately**. For security reasons, you won’t be able to view it again once you close the dialog.
+
+5. **Store the API Key Securely:**  
+   Save the API key in a secure location (e.g., an environment variable or a secure secrets manager) and avoid hardcoding it directly into your application code.
+
+6. **Use the API Key in Your Requests:**  
+   When making API requests to Grafana, include the API key in the HTTP header as follows:  
+   ```
+   Authorization: Bearer <your-api-key>
+   ```
+
+Following these steps will allow you to generate and use API credentials to authenticate with the Grafana API.
+
+
+Below is an example Java 21 program that uses the built‐in HTTP client to connect to your Azure DevOps account and retrieve various pieces of data related to a specific project. In this example, we fetch:
+
+1. **Project Details**
+2. **List of Git Repositories**
+3. **Builds (CI/CD runs)**
+4. **Work Items** using a WIQL query
+
+Before running the code, make sure to:
+
+- Replace the placeholder values (`ORGANIZATION`, `PROJECT`, and `PAT`) with your actual Azure DevOps organization name, project name, and Personal Access Token.
+- Ensure your PAT has the required scopes (for example, **Project and Team**, **Build**, and **Work Items** scopes).
+
+```java
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+public class AzureDevOpsDataDownloader {
+
+    // Replace with your Azure DevOps organization name and project name.
+    private static final String ORGANIZATION = "yourOrganization";
+    private static final String PROJECT = "yourProject";
+    
+    // Replace with your Personal Access Token (PAT)
+    private static final String PAT = "yourPersonalAccessToken";
+    
+    // API version to use
+    private static final String API_VERSION = "6.0"; // adjust if needed
+
+    public static void main(String[] args) {
+        // Create an HTTP client
+        HttpClient client = HttpClient.newHttpClient();
+        
+        // Azure DevOps requires Basic Auth using the PAT. The username can be an empty string.
+        String auth = ":" + PAT;
+        String encodedAuth = Base64.getEncoder()
+                                   .encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+        String authHeader = "Basic " + encodedAuth;
+        
+        // 1. Retrieve Project Details
+        String projectUrl = String.format("https://dev.azure.com/%s/%s/_apis/projects/%s?api-version=%s",
+                ORGANIZATION, PROJECT, PROJECT, API_VERSION);
+        System.out.println("=== Project Details ===");
+        fetchData(client, projectUrl, authHeader);
+        
+        // 2. List Git Repositories in the project
+        String reposUrl = String.format("https://dev.azure.com/%s/%s/_apis/git/repositories?api-version=%s",
+                ORGANIZATION, PROJECT, API_VERSION);
+        System.out.println("\n=== Repositories ===");
+        fetchData(client, reposUrl, authHeader);
+        
+        // 3. List Builds for the project
+        String buildsUrl = String.format("https://dev.azure.com/%s/%s/_apis/build/builds?api-version=%s",
+                ORGANIZATION, PROJECT, API_VERSION);
+        System.out.println("\n=== Builds ===");
+        fetchData(client, buildsUrl, authHeader);
+        
+        // 4. Retrieve Work Items using a WIQL query.
+        // Note: To fetch work items, you must first run a WIQL query.
+        String wiqlUrl = String.format("https://dev.azure.com/%s/%s/_apis/wit/wiql?api-version=%s",
+                ORGANIZATION, PROJECT, API_VERSION);
+        // WIQL query to select work item IDs, titles, and states from the project.
+        String wiqlQuery = """
+                {
+                  "query": "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems WHERE [System.TeamProject] = '%s' ORDER BY [System.Id] ASC"
+                }
+                """.formatted(PROJECT);
+        System.out.println("\n=== Work Items (via WIQL) ===");
+        fetchDataWithPost(client, wiqlUrl, authHeader, wiqlQuery);
+    }
+    
+    /**
+     * Helper method to perform a GET request to the specified URL.
+     */
+    private static void fetchData(HttpClient client, String url, String authHeader) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", authHeader)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if(response.statusCode() != 200) {
+                System.err.println("Error fetching data from " + url);
+                System.err.println("HTTP status: " + response.statusCode());
+                System.err.println(response.body());
+            } else {
+                System.out.println(response.body());
+            }
+        } catch(IOException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * Helper method to perform a POST request with a JSON body.
+     */
+    private static void fetchDataWithPost(HttpClient client, String url, String authHeader, String jsonBody) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", authHeader)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if(response.statusCode() != 200) {
+                System.err.println("Error fetching data from " + url);
+                System.err.println("HTTP status: " + response.statusCode());
+                System.err.println(response.body());
+            } else {
+                System.out.println(response.body());
+            }
+        } catch(IOException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+---
+
+### How This Program Works
+
+1. **Authentication:**  
+   - The program uses Basic Authentication with your Personal Access Token (PAT).  
+   - In Azure DevOps, the username portion is not required (an empty string is acceptable), so we concatenate `":" + PAT`, then Base64 encode it, and add it to the `Authorization` header.
+
+2. **Endpoints:**  
+   - **Project Details:** Retrieves metadata about your project.
+   - **Repositories:** Lists all Git repositories in your project.
+   - **Builds:** Retrieves build data (CI/CD) associated with your project.
+   - **Work Items:** Uses a WIQL query (via a POST request) to retrieve a list of work items for your project.
+
+3. **HTTP Client:**  
+   - The program uses the Java 21 HTTP client to send GET and POST requests.
+   - Responses are printed to the console as raw JSON strings. In a production system, consider parsing the JSON using libraries like Jackson or Gson.
+
+4. **Error Handling:**  
+   - Basic error handling is included by checking the HTTP status codes and printing error messages if the request fails.
+
+---
+
+### Running the Program
+
+1. **Update the Constants:**  
+   Replace `yourOrganization`, `yourProject`, and `yourPersonalAccessToken` with your actual Azure DevOps details.
+
+2. **Compile the Program:**  
+   ```bash
+   javac AzureDevOpsDataDownloader.java
+   ```
+
+3. **Run the Program:**  
+   ```bash
+   java AzureDevOpsDataDownloader
+   ```
+
+This program provides a starting point for connecting to the Azure DevOps API with Java 21 and retrieving various types of project data. You can extend it further by adding more endpoints or processing the JSON responses into Java objects.
+
+
+
+To generate an **Azure DevOps API credential** (Personal Access Token - PAT) for use with the Azure DevOps API, follow these steps:
+
+---
+
+### **Step 1: Sign in to Azure DevOps**
+1. Open [Azure DevOps](https://dev.azure.com/).
+2. Sign in with your Microsoft account.
+
+---
+
+### **Step 2: Navigate to Personal Access Tokens (PAT)**
+1. In the top-right corner, click on your **profile picture** (or user icon).
+2. Select **Personal Access Tokens**.
+3. Click **+ New Token**.
+
+---
+
+### **Step 3: Configure Your Token**
+1. **Name:** Give your token a descriptive name (e.g., *"Java API Token"*).
+2. **Organization:** Select the Azure DevOps organization the token will be used for.
+3. **Expiration:** Choose an expiration date (e.g., 30 days, 90 days, 1 year, or custom).
+4. **Scopes (Permissions):** Select the necessary permissions for API access.  
+   - **For full project access:** Select **Full access**.  
+   - **For specific access:**
+     - **Work Items:** Select `Work Items (Read, Write, Manage)`.
+     - **Builds & Pipelines:** Select `Build (Read)` and `Release (Read)`.
+     - **Repositories:** Select `Code (Read, Write)`.
+     - **Test Management:** Select `Test Management (Read, Write)`.
+     - **Analytics & Reporting:** Select `Analytics (Read)`.
+5. Click **Create**.
+
+---
+
+### **Step 4: Copy the Token**
+1. Once the token is generated, **copy it immediately** and save it securely.
+2. You **won't be able to see it again** after closing the page.
+
+---
+
+### **Step 5: Use the Token in API Requests**
+Azure DevOps uses **Basic Authentication** where:
+- The **username** can be an empty string (`""`) or any string (ignored).
+- The **password** is the Personal Access Token (PAT).
+
+Example **Authorization Header** for API requests:
+```http
+Authorization: Basic <Base64_Encoded_PAT>
+```
+
+In Java, you encode the PAT like this:
+```java
+String auth = ":" + YOUR_PERSONAL_ACCESS_TOKEN;
+String encodedAuth = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+String authHeader = "Basic " + encodedAuth;
+```
+
+---
+
+### **Step 6: Test the API Connection**
+You can test your token by making a simple request to fetch your Azure DevOps projects:
+
+```bash
+curl -u :<your-pat> -X GET "https://dev.azure.com/<your-organization>/_apis/projects?api-version=7.1-preview.4"
+```
+
+---
+
+### **Best Practices**
+- **Store securely**: Use a secrets manager or environment variable instead of hardcoding the token.
+- **Use least privilege**: Only grant necessary permissions.
+- **Rotate regularly**: Renew before the expiration date.
+
+Once you've generated your PAT, you can use it in the Java program I provided earlier to authenticate API requests.
+
+
+Azure DevOps **does not allow** extending the expiration date of an existing Personal Access Token (PAT). Instead, you must **create a new PAT** before the old one expires. However, you can use the Azure DevOps REST API to automate the renewal process by:  
+
+1. Listing existing tokens.  
+2. Creating a new token with the same permissions and extended expiration.  
+3. Updating your system to use the new token.  
+
+---
+
+## **Automating PAT Renewal Using Java 21**
+Azure DevOps provides an API for managing personal access tokens, but it requires an **OAuth-based authentication flow** (not a PAT itself). However, you can manually generate a new PAT using your **Microsoft Entra ID (formerly Azure AD)** authentication.  
+
+### **Steps to Automate PAT Renewal**
+1. **Use Azure AD OAuth Authentication** to obtain a bearer token.
+2. **Call the Azure DevOps Token Management API** to create a new PAT.
+3. **Replace the old token in your system** (store it securely).
+4. **Notify administrators or update secrets in your CI/CD pipeline**.
+
+---
+
+## **Step-by-Step Java 21 Code**
+This example demonstrates how to **create a new PAT** using the Azure DevOps API.
+
+### **1. Get an Azure AD OAuth Token**
+Before making API calls, get an OAuth token using **client credentials**.
+
+```java
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+public class AzureDevOpsPATManager {
+
+    // Replace with your Azure AD Tenant ID, Client ID, and Client Secret
+    private static final String TENANT_ID = "your-tenant-id";
+    private static final String CLIENT_ID = "your-client-id";
+    private static final String CLIENT_SECRET = "your-client-secret";
+    private static final String AZURE_AD_TOKEN_URL = "https://login.microsoftonline.com/" + TENANT_ID + "/oauth2/v2.0/token";
+
+    public static String getAzureADToken() throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newHttpClient();
+        String requestBody = "client_id=" + CLIENT_ID +
+                "&client_secret=" + CLIENT_SECRET +
+                "&scope=499b84ac-1321-427f-aa17-267ca6975798/.default" + // Scope for Azure DevOps
+                "&grant_type=client_credentials";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(AZURE_AD_TOKEN_URL))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        return response.body(); // Extract access_token from JSON response
+    }
+}
+```
+
+---
+
+### **2. Create a New Personal Access Token (PAT)**
+Once you have the **OAuth token**, use it to request a **new PAT**.
+
+```java
+import org.json.JSONObject; // Use org.json to parse JSON (or use Jackson/Gson)
+
+public class AzureDevOpsPATManager {
+    private static final String AZURE_DEVOPS_PAT_API = "https://vssps.dev.azure.com/YOUR_ORG/_apis/tokens/personalaccesstokens?api-version=7.1-preview.1";
+
+    public static String createPAT(String accessToken) throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newHttpClient();
+
+        JSONObject requestBody = new JSONObject();
+        requestBody.put("displayName", "New PAT from Java");
+        requestBody.put("validTo", "2026-02-12T00:00:00Z"); // Set new expiration date
+        requestBody.put("scope", "vso.code vso.build vso.work vso.release");
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(AZURE_DEVOPS_PAT_API))
+                .header("Authorization", "Bearer " + accessToken)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody.toString()))
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        return response.body(); // Extract new PAT from JSON response
+    }
+}
+```
+
+---
+
+### **3. Automate PAT Renewal**
+Call the methods together:
+
+```java
+public class Main {
+    public static void main(String[] args) throws IOException, InterruptedException {
+        String azureADToken = AzureDevOpsPATManager.getAzureADToken();
+        String newPAT = AzureDevOpsPATManager.createPAT(azureADToken);
+
+        System.out.println("New PAT: " + newPAT);
+
+        // Store the new PAT securely in a secrets manager (e.g., Azure Key Vault)
+    }
+}
+```
+
+---
+
+## **Security Considerations**
+- **Never hardcode secrets** like `CLIENT_ID` and `CLIENT_SECRET`. Use environment variables or a secret manager.
+- **Rotate tokens periodically** and revoke old ones.
+- **Restrict token permissions** to only required scopes.
+
+---
+
+## **Alternative: Manual PAT Renewal**
+If OAuth setup is complex, manually:
+1. Create a new PAT via Azure DevOps UI.
+2. Update your application to use the new PAT.
+
+Since Azure DevOps **does not allow extending PAT expiration**, **automating renewal** using OAuth is the best approach.
+
+
+
+Below is an example Java 21 program that uses the built‐in HTTP client to connect to your SonarCloud account and download various pieces of data for your project. In this sample, the program retrieves:
+
+1. **Project Details**  
+2. **Project Measures** (such as lines of code, complexity, violations, coverage)  
+3. **Project Issues**  
+4. **Quality Gate Status**
+
+Before running the program, be sure to:
+
+- Replace the placeholder values for `PROJECT_KEY` and `TOKEN` with your actual SonarCloud project key and your authentication token.
+- Generate your SonarCloud token from your account settings (SonarCloud uses token-based authentication via Basic Auth, where your token is provided as the username and the password is empty).
+
+Below is the complete Java code:
+
+```java
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+public class SonarCloudDataDownloader {
+
+    // Replace with your SonarCloud project key.
+    private static final String PROJECT_KEY = "yourProjectKey";
+    // Replace with your SonarCloud token.
+    private static final String TOKEN = "yourSonarCloudToken";
+    // SonarCloud base URL.
+    private static final String SONARCLOUD_BASE_URL = "https://sonarcloud.io";
+
+    public static void main(String[] args) {
+        HttpClient client = HttpClient.newHttpClient();
+        
+        // SonarCloud uses token-based authentication via Basic Auth.
+        // The token is used as the username with an empty password.
+        String auth = TOKEN + ":";
+        String encodedAuth = Base64.getEncoder()
+                                   .encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+        String authHeader = "Basic " + encodedAuth;
+        
+        // 1. Retrieve Project Details
+        String projectDetailsUrl = SONARCLOUD_BASE_URL + "/api/components/show?component=" + PROJECT_KEY;
+        System.out.println("=== Project Details ===");
+        fetchData(client, projectDetailsUrl, authHeader);
+        
+        // 2. Retrieve Project Measures (for example, lines of code, complexity, violations, coverage)
+        String measuresUrl = SONARCLOUD_BASE_URL + "/api/measures/component?component=" + PROJECT_KEY 
+                             + "&metricKeys=ncloc,complexity,violations,coverage";
+        System.out.println("\n=== Project Measures ===");
+        fetchData(client, measuresUrl, authHeader);
+        
+        // 3. Retrieve Project Issues
+        String issuesUrl = SONARCLOUD_BASE_URL + "/api/issues/search?componentKeys=" + PROJECT_KEY;
+        System.out.println("\n=== Project Issues ===");
+        fetchData(client, issuesUrl, authHeader);
+        
+        // 4. Retrieve Quality Gate Status
+        String qualityGateUrl = SONARCLOUD_BASE_URL + "/api/qualitygates/project_status?projectKey=" + PROJECT_KEY;
+        System.out.println("\n=== Quality Gate Status ===");
+        fetchData(client, qualityGateUrl, authHeader);
+    }
+    
+    /**
+     * Helper method to perform a GET request to the specified URL.
+     *
+     * @param client the HttpClient instance
+     * @param url the API endpoint URL
+     * @param authHeader the Authorization header value
+     */
+    private static void fetchData(HttpClient client, String url, String authHeader) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", authHeader)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                System.err.println("Error fetching data from: " + url);
+                System.err.println("HTTP Status: " + response.statusCode());
+                System.err.println("Response: " + response.body());
+            } else {
+                System.out.println(response.body());
+            }
+        } catch (IOException | InterruptedException e) {
+            System.err.println("Exception occurred while fetching data from: " + url);
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+---
+
+### How This Program Works
+
+1. **Authentication:**  
+   - The program builds a Basic Authentication header using your SonarCloud token.  
+   - Since SonarCloud uses token-based auth, the token is provided as the username (with an empty password).
+
+2. **Endpoints Used:**  
+   - **Project Details:** Uses the `/api/components/show` endpoint to retrieve information about your project.  
+   - **Project Measures:** Uses the `/api/measures/component` endpoint to fetch key metrics (you can add or remove metric keys as needed).  
+   - **Project Issues:** Uses the `/api/issues/search` endpoint to retrieve issues associated with the project.  
+   - **Quality Gate Status:** Uses the `/api/qualitygates/project_status` endpoint to check the quality gate status.
+
+3. **HTTP Client:**  
+   - The Java 21 `HttpClient` is used to perform HTTP GET requests.
+   - The responses are printed as raw JSON to the console. In a real-world application, you might parse the JSON into Java objects using a library like Jackson or Gson.
+
+4. **Running the Program:**  
+   - Replace `yourProjectKey` and `yourSonarCloudToken` with your actual SonarCloud details.
+   - Compile the program using:
+     ```bash
+     javac SonarCloudDataDownloader.java
+     ```
+   - Run the program using:
+     ```bash
+     java SonarCloudDataDownloader
+     ```
+
+This code provides a basic starting point for integrating with the SonarCloud API in Java 21. You can extend the program by adding additional endpoints or by parsing and processing the JSON data as needed for your application.

@@ -1,0 +1,171 @@
+### 2. Calculating a Running Average Over Time
+
+Here we compute a cumulative (running) average of the **integerValue** field for a specific tag. The window function calculates the average from the first entry up to the current row, ordered by **dataCreationDatetime**.
+
+```sql
+WITH tag_time_series AS (
+    SELECT
+        tagID,
+        dataCreationDatetime,
+        integerValue,
+        AVG(integerValue) OVER (
+            PARTITION BY tagID 
+            ORDER BY dataCreationDatetime 
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS running_avg
+    FROM core.vw_tags_full
+    WHERE tagID = 'your_specific_tag'
+      AND dataCreationDatetime IS NOT NULL
+)
+SELECT *
+FROM tag_time_series
+ORDER BY dataCreationDatetime;
+```
+
+**Explanation:**  
+- The window function computes the cumulative average of **integerValue** for each row within the same tag.  
+- The result shows how the average evolves over time for that tag.
+
+---
+
+### 3. Aggregating Data into Hourly Buckets
+
+This example groups the tag data into hourly segments. It calculates the average and count of **integerValue** entries per tag for each hour, based on the normalized **dataCreationDatetime**.
+
+```sql
+WITH hourly_aggregates AS (
+    SELECT 
+        tagID,
+        DATE_FORMAT(dataCreationDatetime, '%Y-%m-%d %H:00:00') AS hour,
+        AVG(integerValue) AS avg_integer,
+        COUNT(*) AS count_values,
+        MIN(dataCreationDatetime) AS first_entry,
+        MAX(dataCreationDatetime) AS last_entry
+    FROM core.vw_tags_full
+    WHERE dataCreationDatetime IS NOT NULL
+    GROUP BY tagID, hour
+)
+SELECT *
+FROM hourly_aggregates
+ORDER BY tagID, hour;
+```
+
+**Explanation:**  
+- The CTE groups data into hourly buckets by converting **dataCreationDatetime** into an hourly timestamp.  
+- It then aggregates the data per **tagID** and hour, providing an average value, count, and the first/last entry timestamps for that bucket.
+
+---
+
+### 4. Comparing Time Series Data for Two Tags Side by Side
+
+If you need to compare the time series for two different tags, you can use two CTEs that generate an ordered sequence for each tag. The rows are then joined on their row numbers to align the entries.
+
+```sql
+WITH tagA AS (
+    SELECT
+        dataCreationDatetime,
+        integerValue,
+        ROW_NUMBER() OVER (ORDER BY dataCreationDatetime) AS rn
+    FROM core.vw_tags_full
+    WHERE tagID = 'tagA'
+      AND dataCreationDatetime IS NOT NULL
+),
+tagB AS (
+    SELECT
+        dataCreationDatetime,
+        integerValue,
+        ROW_NUMBER() OVER (ORDER BY dataCreationDatetime) AS rn
+    FROM core.vw_tags_full
+    WHERE tagID = 'tagB'
+      AND dataCreationDatetime IS NOT NULL
+)
+SELECT 
+    a.dataCreationDatetime AS tagA_time,
+    a.integerValue AS tagA_value,
+    b.dataCreationDatetime AS tagB_time,
+    b.integerValue AS tagB_value
+FROM tagA a
+JOIN tagB b ON a.rn = b.rn;
+```
+
+**Explanation:**  
+- Two separate CTEs create ordered time series for **tagA** and **tagB** using `ROW_NUMBER()`.  
+- Joining these CTEs on their row number (`rn`) aligns the corresponding entries for a side-by-side comparison of their values.
+
+
+
+
+
+
+
+- Filters for rows where the tagPath ends with **"/status"**.  
+- Limits the data to tag_data records whose **dataCreationDatetime** falls within 2023.  
+- Uses a recursive CTE to generate all 12 months (even if some months have no data).  
+- Aggregates the average of a numeric field (here, **integerValue**) per month and returns the 12 averages in chronological order.
+
+You can adjust the date range and the aggregated column as needed.
+
+```sql
+WITH RECURSIVE months AS (
+  -- Generate a list of month start dates for 2023
+  SELECT DATE('2023-01-01') AS month_start
+  UNION ALL
+  SELECT month_start + INTERVAL 1 MONTH
+  FROM months
+  WHERE month_start < DATE('2023-12-01')
+),
+monthly_aggregates AS (
+  SELECT 
+    DATE_FORMAT(dataCreationDatetime, '%Y-%m-01') AS month_start,
+    AVG(integerValue) AS avg_integer
+  FROM core.vw_tags_full
+  WHERE tagPath LIKE '%/status'
+    AND dataCreationDatetime BETWEEN '2023-01-01' AND '2023-12-31 23:59:59'
+  GROUP BY DATE_FORMAT(dataCreationDatetime, '%Y-%m-01')
+)
+SELECT 
+  m.month_start,
+  ma.avg_integer
+FROM months m
+LEFT JOIN monthly_aggregates ma 
+  ON m.month_start = ma.month_start
+ORDER BY m.month_start;
+```
+
+
+
+
+
+
+WITH RECURSIVE periods AS (
+  -- Start with the given start date
+  SELECT DATE(@@start_date@@) AS period_start
+  UNION ALL
+  -- Generate the next period depending on the grouping type
+  SELECT 
+    CASE
+      WHEN @@grouping@@ = 'month' THEN period_start + INTERVAL 1 MONTH
+      WHEN @@grouping@@ = 'year' THEN period_start + INTERVAL 1 YEAR
+    END AS period_start
+  FROM periods
+  WHERE period_start < DATE(@@end_date@@)
+),
+aggregates AS (
+  SELECT 
+    -- Group by period start calculated according to the grouping type
+    CASE
+      WHEN @@grouping@@ = 'month' THEN DATE_FORMAT(dataCreationDatetime, '%Y-%m-01')
+      WHEN @@grouping@@ = 'year' THEN DATE_FORMAT(dataCreationDatetime, '%Y-01-01')
+    END AS period_start,
+    AVG(integerValue) AS avg_value
+  FROM core.vw_tags_full
+  WHERE tagPath LIKE @@pattern@@
+    AND dataCreationDatetime BETWEEN @@start_date@@ AND @@end_date@@
+  GROUP BY period_start
+)
+SELECT 
+  p.period_start,
+  a.avg_value
+FROM periods p
+LEFT JOIN aggregates a ON p.period_start = a.period_start
+ORDER BY p.period_start;

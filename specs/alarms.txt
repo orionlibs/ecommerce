@@ -1,0 +1,19 @@
+In the "create alarm" form show list of existing alarm categories like "NSAT-ticket-KPI" and allow the creation of new alarm categories
+
+Show number of alarms (active, inactive) and alarm events (acknowledged, unacknowledged) in the homepage
+
+For alarms create ValueConditionMode (equals, not equals, greater than setpoint, greater or equal to setpoint, less than setpoint, less or equal to setpoint, any change). Create alarm notification pipeline to send alarm to the appropriate websocket
+
+--create alarms page. Show table of all alarms. Create new alarm by linking a tag property to it by setting setpoint and value comparison mode. Create alarm service. When we change the value of a tag property in the database we check if there is an alarm for that tag property and if yes then we check its value and if it is alertable then we publish to the appropriate websocket and store the alarm event to the database. The alarm shown will have an acknowledge button and mark that event as acknowledged and the system will not show that alarm event again
+
+Create types of alarms (info, severe, etc.) And use different color schemes for the alert based on alarm type
+
+Create the alert module. It will have its own alert_configuration table and active_alerts table. Create table notification_types with one type initially "in-app". The alert_configurations table will point at multiple notification types (notificationTypeID1, ID2, etc.). Create alerts config page inside the config tool to show the existing alert configs, and CRUD operations for them. The system comes with preconfigured alert for core database connectivity problem and another alert to notify users if the connection to the core database has been reestablished. These 2 alerts are not modifiable except for the types of notifications attached to them. Create a "isDeletable" column in the alert_configuration table. Every page will subscribe to the /topic/alert websocket. Create alert.js, import the file in every page, and put code in it that connects to the websocket and if it gets an alert, it will show a beautiful popup or strip at the top of any page with the alert info. Create an alerts container so that alerts can pile up with the most recent at the top. Create different types of alert priority and based on the priority, the color of the alert strip will change. Create alerts tool that shows all alerts in a table. Create a UNS kind of hierarchy for alert tags
+
+Create AlarmListener interface with methods (that take an alarm event object) OnActive, OnAcknowledge. The class that implements this interface can act on alarm events. Use java.util.EventListener
+
+in home page show pie chart of number of active/inactive alarms
+
+Store UserID of user who created an alarm
+
+Function to execute when an alarm is raised

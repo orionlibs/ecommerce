@@ -1,0 +1,2 @@
+Use studio to create report for the average durations of all statuses. "the average duration of the ready for QA status has increased/decreased on average compared to the-preset/last-year.
+in the last 4 weeks the average duration for ready for QA has increased by 50% compared to last year"

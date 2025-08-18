@@ -1,0 +1,270 @@
+--configurability
+--publish/consume events
+--metrics for observability
+--timed metrics for observability
+--uns-cli shell app
+--update README.md
+
+
+Create project "tags-service":
+1--get number of tags
+2--get number of realtime tag providers
+3--get number of historical tag providers
+4--get realtime tag providers
+5--get historical tag providers
+The tag service loads the tag cache in its memory. It subscribes to MQTT and updates its cache and the realtime tag database. It uses a websocket to notify of tag changes
+
+
+The tag historian project subscribes to MQTT and stores tags to the historian. This project has its own default historian. The database service knows which other databases are supposed to be historians. So when this service starts, it calls the database service to retrieve all the other historians and connect to the ones that are marked as active. It also subscribes to the event manager, so when it gets notified that a new historian was just registered (as active) or if a historian was deleted, or marked as active or inactive or if the credentials changed or if the connection URL changed, it will act accordingly. When this project gets a tag from MQTT, it stores to them the tag it just received from MQTT (the databases it is currently connected to)
+
+
+
+Create project "script-service":
+1--get number of scripts configured
+2--get scripts
+The script service will allow users to use Jython or groovy or kotlin or java to write scripts. Find a way to expose certain functions
+
+
+Create project "logger-service":
+1--get logs
+
+
+Create project "diagnostics-service":
+The diagnostics project checks all database connections, the status of all store-and-forward engines, the tag cache
+
+
+Use spring AI to connect to LLMs using configurable API keys to ask it to do various things. Create some built-in commands. It should be able to access the historian
+
+
+Download status report as txt that has all status info or selected info
+
+
+Create project "metrics-service"
+The metrics service can track various things like:
+* **Throughput & Volume**
+  * Messages published/sec per topic
+  * Messages consumed/sec per subscriber
+  * Total messages in flight
+* **Latency & Timing**
+  * Publish-to-consume end-to-end latency (p95, p99)
+  * Broker broker-internal routing latency
+* **Backlog & Storage**
+  * Queue depth / backlog per topic
+  * Retention storage usage
+* **Error & Failure Rates**
+  * Publish failures / retries
+  * Delivery errors (timeouts, malformed)
+  * Consumer re-balance events
+---
+## 3. Tag & Data-Point Metrics
+* **Tag Volume**
+  * Total number of tags (static vs. dynamic)
+  * Tags added/removed per hour
+* **Sampling & Update Rates**
+  * Scan rate distributions (fast, slow tags)
+  * Actual vs. configured scan rate
+* **Data Quality**
+  * % of good vs. bad quality readings
+  * Timestamp skew / staleness
+  * Out-of-range value counts
+* **Throughput**
+  * Data points ingested/sec into historian
+  * Compressed vs. uncompressed storage rates
+---
+## 4. Historian & Time-Series Storage
+* **Write Performance**
+  * Inserts/sec
+  * Write latency (avg, p95)
+* **Read Performance**
+  * Query throughput (queries/sec)
+  * Query latency (avg, p95, p99)
+* **Storage Utilization**
+  * Total DB size
+  * Retained data window vs. policy
+  * Archival job durations & success
+---
+## 5. Application & Scripting
+* **Execution Metrics**
+  * Script/function invocation counts
+  * Execution duration (avg, max, p95, p99)
+  * Error/exception rates
+* **Session & Connection**
+  * Active user sessions
+  * API connection counts
+  * Session duration
+* **Cache Performance**
+  * Cache hit/miss ratios
+  * Eviction counts
+---
+## 6. Alarm & Notification
+* **Alarm Rates**
+  * Total alarms generated/sec
+  * Active vs. cleared alarms
+* **Severity Distribution**
+  * % of critical, major, minor
+* **Notification Delivery**
+  * Notifications sent/sec (email, SMS, webhook)
+  * Delivery success/failure rates
+  * Avg notification latency
+* **Acknowledgment & Escalation**
+  * Time to acknowledge (avg, max)
+  * Escalation count
+---
+## 7. Integration & Connectivity
+* **Endpoint Health**
+  * OPC UA/DA uptime & reconnects
+  * MQTT/TCP connection counts & drops
+  * HTTP API error rates (4xx, 5xx)
+* **Throughput**
+  * Data transferred per connector
+  * Polling vs. event-driven ratio
+* **Protocol Metrics**
+  * OPC UA SecureChannel opens/closes
+  * MQTT keep-alive ping failures
+---
+## 8. Security & Audit
+* **Authentication**
+  * Login success/failure rate
+  * Failed login streaks (per IP/user)
+* **Authorization**
+  * Access denials (role-based checks)
+  * Privilege escalations detected
+* **Network Security**
+  * TLS handshake failures
+  * Suspicious IP blocklists hits
+* **Audit Trails**
+  * Configuration change events
+  * User actions (create/delete tag, modify script)
+---
+## 9. Reliability & Availability
+* **Service Uptime**
+  * Percent availability (SLI/SLO)
+  * Mean Time Between Failures (MTBF)
+  * Mean Time To Recovery (MTTR)
+* **Redundancy**
+  * Failover events
+  * Replica synchronization lag
+* **Backup & Restore**
+  * Backup job success rates & duration
+  * Restore drill durations
+---
+## 10. Metrics Service-Specific
+* **Ingestion**
+  * Metric points ingested/sec
+  * Ingestion error rate
+* **Storage & Indexing**
+  * DB write/read latency
+  * Index size & growth rate
+* **Query & Visualization**
+  * Dashboard query latency
+  * Concurrent dashboard sessions
+* **Retention & Downsampling**
+  * Data retention policy hits
+  * Compaction job durations
+* **Alerting on Metrics**
+  * Rule eval/sec
+  * Alerts fired vs. suppressed
+* **Internal Health**
+  * Service CPU/memory usage
+  * Request timeouts
+  * Garbage collection pause times
+
+
+Create project "analytics-service"
+
+
+Create project "project-service"
+
+
+Create project "email-service"
+
+
+Create math library
+
+
+Create data sources service
+--can connect to various databases or other types of data providers
+--data source explorer shows the data model (DDL) and query tool
+
+
+Create historian simulator service used to create demo models and tags for testing
+
+
+Create model service project representing a hierarchical model of entities.
+--We can create folders, thing, events, metrics, KPIs, scripts.
+--We can add, rename, delete, move up, move down, refresh entities.
+--entities are associated with tags
+--We can create, rename, delete, use model or entity templates. We can use templates to create new entities, or deassociate entities from templates, or create a template using an existing entity as the prototype
+
+
+Create project service project used to create HMI projects
+--a project has name, description etc. It also has windows that include components i.em tabs, gauges, charts, scripts, tags, reports, labels, buttons, textboxes, textareas, static images, images like tanks that show the percentage of its capacity used, tables
+--the values of components are binded to tags, MySQL queries, static values, built-in or custom functions, expressions using my DSL to calculate things, to the value of another component's property
+--the value binding can be event-triggered or by polling
+--we can group and ungroup components
+--we can create and use component templates
+--we can use component group templates
+--components properties: name, is enabled, is visible
+--we can export the components of a window or an entire project
+--we can import the components of a window or an entire project
+--show a tree of the structure of a project
+--create project template and new projects derived by it inherit its windows, components and properties
+
+
+Create tag historian service project
+--create tag groups
+--create UDT (user-defined tags)
+--create new tag, set the data source from which we retrieve its values or the MQTT topic, set the tag group it belongs to, set data type, set the deadband (if the new value minus the last value is >= deadband then store the new value in the historian and the realtime tag database
+--enable or disable maintaining historian values
+
+
+Use the abstract event publisher for all API endpoints
+
+
+Make things configurable. Create pojo classes that hold config and the config is loaded during startup using @Value("${prop}") and add environment props inside the application.YAML file and then use @ConditionalProperties inside the config pojo
+
+
+Use virtual threads where possible
+
+
+Device control service allows us to send commands to devices via some protocol
+
+
+services can use kafka to publish events. Implement MQTT publishing, as well using HiveMQ
+
+
+Create sequential function chart service project
+--create an SFC which is a sequence of scripts to be executed
+
+
+Create feedback service for people to submit feedback
+
+
+Create support service for users to create support requests and support users to create and manage support tickets
+
+
+Create a command line utility project allowing users to run certain tasks by calling (internally) the APIs. Find how to generate a client SDK in java from all APIs. The utility will use this SDK
+
+
+Create project "databases-service" with API:
+5--get currently running queries per database
+6--get long-running queries per database
+7--get queries per second per database
+8--get queries per second from all databases
+
+
+Create project "alarms-service":
+The alarm service subscribes to MQTT and checks if the tag updated should raise an alarm. The alarm subscribes to the event manager so that if an event that just occurred has an attached alarm, it will raise an alarm
+
+
+https://openautomationsoftware.com/knowledge-base/options-reference/
+
+
+https://openautomationsoftware.com/knowledge-base/parameter-properties/
+
+
+https://www.gevernova.com/software/documentation/proficy-plant-applications/version2023/index_api_endpoint.html
+
+
+ignition JavaDocs
+https://files.inductiveautomation.com/sdk/javadoc/earlyaccess/ignition83/8.3.0-SNAPSHOT/index.html
