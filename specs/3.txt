@@ -1,0 +1,812 @@
+```sql
+CREATE TABLE lifecycle_definitions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    key VARCHAR(255) NOT NULL,
+    version INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    payload JSONB NOT NULL,
+    created_by VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (key, version, tenant_id)
+);
+```
+
+
+```java
+@RestController
+@RequestMapping("/api/v1/instances")
+@RequiredArgsConstructor
+@Validated
+public class LifecycleInstanceController {
+
+    private final LifecycleEngineService lifecycleEngineService;
+
+    @PostMapping("/{id}/transitions")
+    public ResponseEntity<?> requestTransition(
+            @PathVariable("id") UUID instanceId,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody @Valid TransitionRequest request) {
+        
+        // Idempotency handling would be implemented here, likely via a filter/aspect
+        LifecycleInstance updatedInstance = lifecycleEngineService.requestTransition(instanceId, request);
+        return ResponseEntity.ok(updatedInstance); // Map to an InstanceResponse DTO
+    }
+    
+    // ... other GET, POST endpoints
+}
+```
+
+### Next Steps & How to Run
+      * Use an API client (like Postman or cURL) to create a `LifecycleDefinition` in the database.
+      * Create a `LifecycleInstance` pointing to that definition.
+      * Call the `POST /api/v1/instances/{id}/transitions` endpoint
+      * Verify that the instance's state changes in the database
+      
+      
+      
+      
+Of course. As a software engineering expert specializing in Java 21 and Spring Boot 3, I will provide a comprehensive set of JUnit 5 tests for the specified Lifecycle Management System.
+
+The testing strategy will be divided into two main parts:
+
+1.  **Service Layer Unit Tests (`LifecycleEngineServiceTest`):** These tests will focus on the core business logic within the `LifecycleEngineService`. We will use Mockito to mock all external dependencies (repositories, outbox service) to ensure the service logic is tested in isolation. This allows us to verify state transitions, guard evaluations, and interactions with collaborators without needing a database or a full application context.
+
+2.  **Web Layer Slice Tests (`LifecycleInstanceControllerTest`):** These tests will focus on the API layer, specifically the `LifecycleInstanceController`. We will use `@WebMvcTest` to create a lightweight Spring context containing only the web-layer components. The service layer (`LifecycleEngineService`) will be mocked. This approach allows us to test request handling, deserialization of the request body, validation constraints (`@Valid`), and serialization of the response.
+
+Here are the complete JUnit 5 test classes.
+
+-----
+
+### 1\. `pom.xml` Dependencies
+
+To run these tests, you would need the following dependencies in your `pom.xml` file:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>com.fasterxml.jackson.dataformat</groupId>
+        <artifactId>jackson-dataformat-yaml</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+```
+
+-----
+
+### 2\. Service Layer Unit Tests (`LifecycleEngineServiceTest.java`)
+
+This class unit tests the core logic of the `LifecycleEngineService`.
+
+```java
+package com.lms.core.service;
+
+import com.lms.api.dto.TransitionRequest;
+import com.lms.persistence.entity.LifecycleDefinition;
+import com.lms.persistence.entity.LifecycleInstance;
+import com.lms.persistence.repository.LifecycleDefinitionRepository;
+import com.lms.persistence.repository.LifecycleHistoryRepository;
+import com.lms.persistence.repository.LifecycleInstanceRepository;
+import com.lms.messaging.outbox.OutboxService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Collections;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+@DisplayName("LifecycleEngineService Tests")
+class LifecycleEngineServiceTest {
+
+    @Mock
+    private LifecycleInstanceRepository instanceRepository;
+
+    @Mock
+    private LifecycleDefinitionRepository definitionRepository;
+
+    @Mock
+    private LifecycleHistoryRepository historyRepository; // Assuming this exists for history recording
+
+    @Mock
+    private OutboxService outboxService; // Assuming a concrete implementation exists
+
+    @InjectMocks
+    private LifecycleEngineService lifecycleEngineService;
+
+    private UUID instanceId;
+    private String tenantId;
+    private LifecycleInstance testInstance;
+    private LifecycleDefinition testDefinition;
+    private String yamlDefinitionPayload;
+
+    @BeforeEach
+    void setUp() {
+        instanceId = UUID.randomUUID();
+        tenantId = "test-tenant";
+
+        // Basic YAML definition for testing
+        yamlDefinitionPayload = """
+        key: "DOCUMENT_APPROVAL"
+        name: "Document Approval Workflow"
+        version: 1
+        states:
+          - "DRAFT"
+          - "IN_REVIEW"
+          - "APPROVED"
+          - "REJECTED"
+        transitions:
+          - name: "SUBMIT"
+            from: "DRAFT"
+            to: "IN_REVIEW"
+          - name: "APPROVE"
+            from: "IN_REVIEW"
+            to: "APPROVED"
+            guards:
+              - expression: "metadata['isReviewed'] == true"
+          - name: "REJECT"
+            from: "IN_REVIEW"
+            to: "REJECTED"
+        """;
+
+        testInstance = new LifecycleInstance();
+        testInstance.setId(instanceId);
+        testInstance.setEntityType("DOCUMENT");
+        testInstance.setEntityId("DOC-123");
+        testInstance.setCurrentState("DRAFT");
+        testInstance.setDefinitionKey("DOCUMENT_APPROVAL");
+        testInstance.setDefinitionVersion(1);
+        testInstance.setTenantId(tenantId);
+        testInstance.setMetadata(Collections.emptyMap());
+
+        testDefinition = new LifecycleDefinition(); // Assuming a LifecycleDefinition entity class exists
+        testDefinition.setId(UUID.randomUUID());
+        testDefinition.setKey("DOCUMENT_APPROVAL");
+        testDefinition.setVersion(1);
+        testDefinition.setTenantId(tenantId);
+        testDefinition.setPayload(yamlDefinitionPayload);
+    }
+
+    @Nested
+    @DisplayName("Successful Transitions")
+    class SuccessScenarios {
+
+        @Test
+        @DisplayName("should transition state successfully when transition is valid and has no guards")
+        void requestTransition_whenValid_shouldSucceed() {
+            // Arrange
+            testInstance.setCurrentState("DRAFT");
+            TransitionRequest request = new TransitionRequest("SUBMIT", "user-actor", "Submitting for review", null);
+
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.of(testInstance));
+            when(definitionRepository.findByKeyAndVersionAndTenantId("DOCUMENT_APPROVAL", 1, tenantId))
+                    .thenReturn(Optional.of(testDefinition));
+            // Capture the instance being saved to verify its state
+            when(instanceRepository.save(any(LifecycleInstance.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+            // Act
+            LifecycleInstance updatedInstance = lifecycleEngineService.requestTransition(instanceId, request);
+
+            // Assert
+            assertThat(updatedInstance).isNotNull();
+            assertThat(updatedInstance.getCurrentState()).isEqualTo("IN_REVIEW");
+
+            // Verify interactions
+            verify(instanceRepository).save(any(LifecycleInstance.class));
+            verify(historyRepository).save(any()); // Assuming a `recordHistory` helper that saves to the repo
+            verify(outboxService).createAndSaveEvent(any());
+        }
+
+        @Test
+        @DisplayName("should transition state successfully when guard condition is met")
+        void requestTransition_whenGuardPasses_shouldSucceed() {
+            // Arrange
+            testInstance.setCurrentState("IN_REVIEW");
+            testInstance.setMetadata(Map.of("isReviewed", true)); // Metadata that satisfies the guard
+            TransitionRequest request = new TransitionRequest("APPROVE", "manager-actor", "Approved", null);
+
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.of(testInstance));
+            when(definitionRepository.findByKeyAndVersionAndTenantId("DOCUMENT_APPROVAL", 1, tenantId))
+                    .thenReturn(Optional.of(testDefinition));
+            when(instanceRepository.save(any(LifecycleInstance.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+            // Act
+            LifecycleInstance updatedInstance = lifecycleEngineService.requestTransition(instanceId, request);
+
+            // Assert
+            assertThat(updatedInstance.getCurrentState()).isEqualTo("APPROVED");
+
+            ArgumentCaptor<LifecycleInstance> instanceCaptor = ArgumentCaptor.forClass(LifecycleInstance.class);
+            verify(instanceRepository).save(instanceCaptor.capture());
+            assertThat(instanceCaptor.getValue().getCurrentState()).isEqualTo("APPROVED");
+
+            verify(historyRepository).save(any());
+            verify(outboxService).createAndSaveEvent(any());
+        }
+    }
+
+    @Nested
+    @DisplayName("Failed Transitions")
+    class FailureScenarios {
+
+        @Test
+        @DisplayName("should throw exception when instance is not found")
+        void requestTransition_whenInstanceNotFound_shouldThrowException() {
+            // Arrange
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.empty());
+            TransitionRequest request = new TransitionRequest("SUBMIT", "user-actor", null, null);
+
+            // Act & Assert
+            assertThatThrownBy(() -> lifecycleEngineService.requestTransition(instanceId, request))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessage("Instance not found");
+        }
+
+        @Test
+        @DisplayName("should throw exception when definition is not found")
+        void requestTransition_whenDefinitionNotFound_shouldThrowException() {
+            // Arrange
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.of(testInstance));
+            when(definitionRepository.findByKeyAndVersionAndTenantId(anyString(), anyInt(), anyString()))
+                    .thenReturn(Optional.empty());
+            TransitionRequest request = new TransitionRequest("SUBMIT", "user-actor", null, null);
+
+            // Act & Assert
+            assertThatThrownBy(() -> lifecycleEngineService.requestTransition(instanceId, request))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessage("Definition not found");
+        }
+
+        @Test
+        @DisplayName("should throw exception for an invalid transition from the current state")
+        void requestTransition_whenTransitionIsInvalidForState_shouldThrowException() {
+            // Arrange
+            testInstance.setCurrentState("DRAFT"); // Cannot "APPROVE" from "DRAFT"
+            TransitionRequest request = new TransitionRequest("APPROVE", "user-actor", null, null);
+
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.of(testInstance));
+            when(definitionRepository.findByKeyAndVersionAndTenantId(anyString(), anyInt(), anyString()))
+                    .thenReturn(Optional.of(testDefinition));
+
+            // Act & Assert
+            assertThatThrownBy(() -> lifecycleEngineService.requestTransition(instanceId, request))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessage("Invalid transition 'APPROVE' from state 'DRAFT'");
+
+            // Verify no side-effects occurred
+            verify(instanceRepository, never()).save(any());
+            verify(historyRepository, never()).save(any());
+            verify(outboxService, never()).createAndSaveEvent(any());
+        }
+
+        @Test
+        @DisplayName("should throw exception when guard condition is not met")
+        void requestTransition_whenGuardFails_shouldThrowException() {
+            // Arrange
+            testInstance.setCurrentState("IN_REVIEW");
+            testInstance.setMetadata(Map.of("isReviewed", false)); // This will fail the guard
+            TransitionRequest request = new TransitionRequest("APPROVE", "manager-actor", "Attempted approval", null);
+
+            when(instanceRepository.findById(instanceId)).thenReturn(Optional.of(testInstance));
+            when(definitionRepository.findByKeyAndVersionAndTenantId(anyString(), anyInt(), anyString()))
+                    .thenReturn(Optional.of(testDefinition));
+
+            // Act & Assert
+            assertThatThrownBy(() -> lifecycleEngineService.requestTransition(instanceId, request))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessage("Guard condition not met: metadata['isReviewed'] == true");
+
+            // Verify no state change or side-effects
+            verify(instanceRepository, never()).save(any());
+        }
+    }
+}
+```
+
+-----
+
+### 3\. Web Layer Slice Tests (`LifecycleInstanceControllerTest.java`)
+
+This class tests the `LifecycleInstanceController`, ensuring it handles requests correctly, validates input, and returns the expected responses.
+
+```java
+package com.lms.controller;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lms.api.dto.TransitionRequest;
+import com.lms.core.service.LifecycleEngineService;
+import com.lms.persistence.entity.LifecycleInstance;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+import java.time.Instant;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+@WebMvcTest(LifecycleInstanceController.class)
+@DisplayName("LifecycleInstanceController Tests")
+class LifecycleInstanceControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    @MockBean
+    private LifecycleEngineService lifecycleEngineService;
+
+    @Test
+    @DisplayName("POST /api/v1/instances/{id}/transitions - should return 200 OK with updated instance on valid request")
+    void requestTransition_whenValidRequest_shouldReturn200Ok() throws Exception {
+        // Arrange
+        UUID instanceId = UUID.randomUUID();
+        TransitionRequest request = new TransitionRequest("SUBMIT", "user-1", "Ready for review", Map.of("key", "value"));
+
+        LifecycleInstance updatedInstance = new LifecycleInstance();
+        updatedInstance.setId(instanceId);
+        updatedInstance.setCurrentState("SUBMITTED");
+        updatedInstance.setEntityType("DOCUMENT");
+        updatedInstance.setEntityId("DOC-456");
+        updatedInstance.setTenantId("test-tenant");
+        updatedInstance.setCreatedAt(Instant.now());
+        updatedInstance.setUpdatedAt(Instant.now());
+        updatedInstance.setVersion(1L);
+
+        when(lifecycleEngineService.requestTransition(eq(instanceId), any(TransitionRequest.class)))
+                .thenReturn(updatedInstance);
+
+        // Act & Assert
+        mockMvc.perform(post("/api/v1/instances/{id}/transitions", instanceId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(instanceId.toString()))
+                .andExpect(jsonPath("$.currentState").value("SUBMITTED"))
+                .andExpect(jsonPath("$.version").value(1));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/instances/{id}/transitions - should return 400 Bad Request if transitionName is blank")
+    void requestTransition_whenTransitionNameIsBlank_shouldReturn400BadRequest() throws Exception {
+        // Arrange
+        UUID instanceId = UUID.randomUUID();
+        // Invalid request: transitionName is blank
+        TransitionRequest request = new TransitionRequest(" ", "user-1", "reason", null);
+
+        // Act & Assert
+        mockMvc.perform(post("/api/v1/instances/{id}/transitions", instanceId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/instances/{id}/transitions - should return 400 Bad Request if actor is blank")
+    void requestTransition_whenActorIsBlank_shouldReturn400BadRequest() throws Exception {
+        // Arrange
+        UUID instanceId = UUID.randomUUID();
+        // Invalid request: actor is blank
+        TransitionRequest request = new TransitionRequest("SUBMIT", "", "reason", null);
+
+        // Act & Assert
+        mockMvc.perform(post("/api/v1/instances/{id}/transitions", instanceId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/instances/{id}/transitions - should return 500 Internal Server Error when service throws exception")
+    void requestTransition_whenServiceThrowsException_shouldReturn500() throws Exception {
+        // Arrange
+        UUID instanceId = UUID.randomUUID();
+        TransitionRequest request = new TransitionRequest("SUBMIT", "user-1", "reason", null);
+
+        String errorMessage = "Instance not found";
+        when(lifecycleEngineService.requestTransition(eq(instanceId), any(TransitionRequest.class)))
+                .thenThrow(new RuntimeException(errorMessage));
+
+        // Act & Assert
+        mockMvc.perform(post("/api/v1/instances/{id}/transitions", instanceId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isInternalServerError()); // Or a more specific status code if you have a @ControllerAdvice
+    }
+}
+```
+      
+      
+      
+      
+      
+# Lifecycle Management Service — Design
+
+**Context & purpose**
+
+This document describes a production-ready Lifecycle Management Service (LMS) for a Spring Boot 3 / Java 21 microservices eCommerce platform. The LMS is a centralized, extensible service that manages state machines, approvals, scheduling, versioning, and audit/history for domain entities (Products, CatalogItems, Promotions, Content, Orders, etc.). It exposes REST/gRPC APIs, publishes lifecycle events, supports human approvals and automated transitions, and integrates with other microservices via messaging and webhooks.
+
+---
+
+# Goals
+
+* Provide a reusable, domain-agnostic lifecycle engine for all platform entities.
+* Support declarative lifecycle definitions (DSL/YAML/JSON), per-tenant overrides and versioning.
+* Provide robust audit, approval workflows, scheduling, and state-history.
+* Integrate with event bus (Kafka/RabbitMQ), webhooks, and domain microservices via adapters.
+* Be secure, observable, scalable, and fault tolerant (transactional outbox, idempotency, retries).
+
+---
+
+# High-level responsibilities
+
+* Store and serve lifecycle definitions and versions.
+* Manage lifecycle instances (an instance = a specific domain entity under a lifecycle).
+* Validate and execute transitions (automated and manual).
+* Run approval flows (single/multi-step approvers, SLA, auto-reject/auto-approve policies).
+* Schedule future transitions and expirations.
+* Publish lifecycle events that other services consume.
+* Keep full audit trails and support snapshots/rollback.
+* Expose admin UI for lifecycle authoring and monitoring.
+
+---
+
+# Key features
+
+1. **Lifecycle definition authoring** (DSL): states, transitions, guards, actions (sync/async), approval steps, notifications, retry policy, compensation actions.
+2. **Versioning of lifecycle definitions** and migration tools for instances.
+3. **Lifecycle instances**: attach to any domain object (by type + id), track current state, metadata, properties.
+4. **Graphical state visualizer** and authoring UI with validation and simulation.
+5. **Approval workflows**: roles-based approvers, parallel/serial approvals, deadline handling, escalations.
+6. **Scheduling**: time-based transitions (e.g., publish at), TTL state transitions (e.g., auto-deprecate after 1 year).
+7. **Eventing & Outbox**: publish lifecycle.events.{entityType} via Kafka; transactional outbox for guaranteed delivery.
+8. **Webhooks & callbacks** for systems that need push notifications.
+9. **Adapters & SDKs**: lightweight client libraries for Java/JS, and generic webhook/gRPC adapters.
+10. **Audit & history**: complete immutable timeline with who/what/when/why.
+11. **Simulation & dry-run**: test transitions without changing live instances.
+12. **Access control**: RBAC and approval scoping per tenant.
+13. **Multi-tenant support**: tenant-specific definitions and overrides.
+14. **Data retention & archiving** rules and GDPR-friendly deletion/erase.
+15. **Admin operations**: force transition, rollback, snapshot restore, bulk operations.
+16. **Observability**: metrics, traces, dashboards, alerting, and audit exports.
+
+---
+
+# Domain model (conceptual)
+
+* **LifecycleDefinition** (id, key, name, version, json/yaml, createdBy, createdAt, tenantId)
+* **LifecycleTransition** (id, definitionId, fromState, toState, name, guardExpression, actions\[])
+* **LifecycleInstance** (id, entityType, entityId, definitionId, definitionVersion, currentState, metadata jsonb, createdAt, updatedAt, tenantId)
+* **LifecycleEvent** (id, instanceId, eventType, payload jsonb, status, createdAt)
+* **Approval** (id, instanceId, transitionId, approverId, status, comments, createdAt, resolvedAt)
+* **Schedule** (id, instanceId, transitionId, executeAt, cronExpression?, status)
+* **AuditRecord** (id, instanceId, actor, action, details jsonb, timestamp)
+
+> Data fields: use UUIDs for IDs, JSONB for flexible metadata, timestamps with timezone.
+
+---
+
+# Example lifecycle for product publishing (illustrative)
+
+States: `Draft` -> `Review` -> `Approved` -> `Published` -> `Deprecated` -> `Deleted`
+
+Transitions examples:
+
+* `submit_for_review` (Draft -> Review) — triggers notification.
+* `approve` (Review -> Approved) — requires 1-2 approvers (parallel/serial configurable).
+* `publish` (Approved -> Published) — scheduled publish support (executeAt).
+* `deprecate` (Published -> Deprecated) — TTL based or manual.
+* `delete` (Deprecated -> Deleted) — hard-delete after retention.
+
+Guards/actions: validate metadata completeness, call product-indexer service to index on `Published`, publish Kafka event `lifecycle.event.product.published`.
+
+---
+
+# APIs (REST first, add gRPC later)
+
+All endpoints require `Authorization: Bearer <jwt>` and `X-Tenant-Id` header for multi-tenant.
+
+### Lifecycle definitions
+
+* `GET /api/v1/lifecycles` — list definitions (filters: tenant, entityType)
+* `POST /api/v1/lifecycles` — create lifecycle definition (YAML/JSON body)
+* `GET /api/v1/lifecycles/{key}/versions` — list versions
+* `GET /api/v1/lifecycles/{key}/versions/{version}` — get definition
+* `PUT /api/v1/lifecycles/{key}/versions/{version}` — update (create new version)
+* `POST /api/v1/lifecycles/{key}/simulate` — simulate transitions given instance state
+
+### Lifecycle instances
+
+* `POST /api/v1/instances` — create instance `{ entityType, entityId, lifecycleKey, lifecycleVersion?, metadata? }`
+* `GET /api/v1/instances/{id}` — get instance and current state
+* `POST /api/v1/instances/{id}/transitions` — request a transition `{ transitionName, actor, reason, payload, idempotencyKey? }`
+* `GET /api/v1/instances/{id}/history` — audit timeline
+* `POST /api/v1/instances/{id}/schedule` — schedule transition `{ transitionName, executeAt/crontab }`
+* `POST /api/v1/instances/{id}/force` — admin forced transition (audit recorded)
+
+### Approvals
+
+* `GET /api/v1/approvals?assignee=...` — list pending approvals
+* `POST /api/v1/approvals/{id}/resolve` — `{ decision: APPROVE|REJECT, comments }`
+
+### Admin
+
+* `POST /api/v1/definitions/{key}/migrate` — bulk migrate instances to new version
+* `POST /api/v1/instances/bulk` — bulk create or bulk transition
+* `GET /api/v1/metrics/health` — LMS health and metrics summary
+
+---
+
+# Events & messaging
+
+* Publish event types: `lifecycle.instance.created`, `lifecycle.transition.requested`, `lifecycle.transition.executed`, `lifecycle.approval.requested`, `lifecycle.approval.resolved`, `lifecycle.instance.archived`.
+* Use Kafka topics: `lifecycle.events` with a `type` and `entityType` header for routing. Schema: Avro/Protobuf for strong typing.
+* Implement transactional outbox pattern: write event to `outbox` table in same DB tx as instance update; separate outbox worker publishes to Kafka.
+* Provide webhook subscription service: `POST /api/v1/subscriptions` to register domain services to receive HTTP callbacks for particular event types.
+
+---
+
+# Integration patterns
+
+* **Push**: domain services subscribe to `lifecycle.events` or register webhooks.
+* **Pull**: domain services query `GET /api/v1/instances?entityType=Product&entityId=...` to reconcile state.
+* **Callback adapters**: provide small adapters or libraries to handle idempotency, retries and verify events.
+* **Saga coordination**: LMS emits events; downstream services may run compensating actions if downstream failure occurs (LMS supports compensation actions as part of transition definition).
+
+---
+
+# State machine engine — design options
+
+**Option A — Declarative engine (recommended)**
+
+* Store definitions as JSON/YAML. Interpret them at runtime with an in-memory engine that enforces guards/actions.
+* Persist instance state and transition history.
+* Use a small rule engine for guard expressions (e.g., MVEL, SpEL) but sandboxed — prefer compiled expressions with limited capabilities.
+
+**Option B — External workflow engine**
+
+* Use Temporal/Zeebe for complex long-running workflows and retries. The LMS acts as a thin control plane and stores definitions in Temporal. Good when heavy orchestration required.
+
+Note: start with Option A for simplicity, design abstraction so later you can plug in Temporal for complex orchestrations.
+
+---
+
+# Persistence & schema (Postgres recommended)
+
+Tables (summary):
+
+* `lifecycle_definitions` (uuid, key, version int, name, payload jsonb, tenant\_id, created\_by, created\_at)
+* `lifecycle_instances` (uuid, entity\_type, entity\_id, definition\_key, definition\_version, current\_state, metadata jsonb, created\_at, updated\_at)
+* `lifecycle_events_outbox` (uuid, topic, payload jsonb, status, retry\_count, created\_at, last\_attempt\_at)
+* `lifecycle_approvals` (uuid, instance\_id, transition\_name, approver, status, comments, created\_at, resolved\_at)
+* `lifecycle_history` (uuid, instance\_id, actor, action, details jsonb, timestamp)
+* `lifecycle_schedules` (uuid, instance\_id, transition\_name, execute\_at, cron\_expr, status)
+
+Indexes: primary by uuid, unique(entity\_type, entity\_id) if one instance per entity, index on (tenant\_id), index on scheduled time for job polling.
+
+Retention: archive history older than X days to a cold store (S3) if required.
+
+---
+
+# Concurrency, idempotency & resilience
+
+* Require `idempotency-key` header for transition requests and scheduled jobs to ensure exactly-once semantics.
+* Use optimistic locking on `lifecycle_instances` (version column) to avoid lost updates.
+* Durable scheduling: store schedules in DB and have worker pool claim jobs (SELECT ... FOR UPDATE SKIP LOCKED).
+* Dead-letter queue for failed events with admin UI to reprocess.
+* Retries: exponential backoff for external actions, configurable per-action in definition.
+
+---
+
+# Security and access control
+
+* Authentication: OAuth2 / OpenID Connect (JWT tokens).
+* Authorization: RBAC with roles: `LIFECYCLE_ADMIN`, `LIFECYCLE_DEVELOPER`, `APPROVER`, `AUDITOR`.
+* Fine-grained permissions on lifecycle definitions and instances (tenant-scoped).
+* Approval policies: require approver to present credentials; actions recorded with actor identity.
+* Secrets: avoid storing credentials in lifecycle definition—use references to secrets manager.
+
+---
+
+# UI / UX
+
+* **Authoring UI**: visual graph editor, JSON/YAML toggle, validation errors, version publish button.
+* **Instance dashboard**: list instances by entityType, filter by state, tenant, date; detail panel with state timeline and action buttons.
+* **Approval inbox**: approvers see pending approvals, SLA timers, accept/reject with comments.
+* **Admin tools**: migration runner, outbox monitor, dead-letter reprocessor, audit export.
+
+---
+
+# Observability & operations
+
+* Tracing: OpenTelemetry for distributed traces (tag events with instanceId).
+* Metrics: Prometheus metrics for counts of transitions, failed transitions, approvals pending, schedule backlog.
+* Logs: structured logging (JSON), correlate with requestId and instanceId.
+* Dashboards: Grafana dashboards for key metrics and SLA breaches.
+* Alerts: alert on failed publish rate, approval SLA misses, outbox publish lag.
+
+---
+
+# Testing strategy
+
+* Unit tests for engine, guard evaluation and action dispatch.
+* Integration tests with embedded Postgres + test Kafka (or Testcontainers) for outbox.
+* Contract tests (PACT) for event consumers/producers.
+* End-to-end tests for full lifecycle including approvals and scheduled transitions.
+* Property-based tests for state machine invariants.
+
+---
+
+# Deployment & infra
+
+* Package as Spring Boot 3 native-friendly JAR; consider Graal native-image later.
+* Deploy on Kubernetes with Helm charts. Use HPA (Horizontal Pod Autoscaler) and adequate resource requests/limits.
+* DB: managed Postgres (RDS/Azure/GCP Cloud SQL) with read replicas if needed.
+* Messaging: Kafka cluster (or managed Kafka) with topics partitioned by tenant or entity type for scale.
+* CI/CD: build pipelines that validate lifecycle definitions (lint), run integration tests, and deploy via GitOps.
+
+---
+
+# Example lifecycle definition (YAML)
+
+```yaml
+key: product.publishing
+name: Product Publishing
+version: 1
+states:
+  - Draft
+  - Review
+  - Approved
+  - Published
+  - Deprecated
+  - Deleted
+transitions:
+  - name: submit_for_review
+    from: Draft
+    to: Review
+    actions:
+      - type: notify
+        target: topic:notifications
+  - name: approve
+    from: Review
+    to: Approved
+    approvals:
+      type: parallel
+      required: 2
+    guards:
+      - expression: "metadata.price > 0"
+  - name: publish
+    from: Approved
+    to: Published
+    schedule: true
+    actions:
+      - type: call
+        target: service:product-indexer
+        retries: 3
+  - name: deprecate
+    from: Published
+    to: Deprecated
+    scheduleAfter: 365d
+```
+
+---
+
+# Example REST call — request transition
+
+```
+POST /api/v1/instances/123e4567-89ab-cdef-0123-456789abcdef/transitions
+Authorization: Bearer <jwt>
+Idempotency-Key: abc-123
+
+{
+  "transitionName":"publish",
+  "actor":"user:alice",
+  "payload": { "executeAt": "2025-09-01T10:00:00Z" },
+  "reason":"Marketing campaign launch"
+}
+```
+
+---
+
+# Sample Java DTO (Spring record style)
+
+```java
+package com.yourorg.lms.dto;
+
+import java.util.UUID;
+import java.time.Instant;
+
+public record TransitionRequest(
+    UUID instanceId,
+    String transitionName,
+    String actor,
+    String idempotencyKey,
+    java.util.Map<String,Object> payload,
+    String reason
+) {}
+```
+
+---
+
+# Roadmap / Implementation phases
+
+1. **MVP (4-8 weeks)**
+
+   * Core lifecycle definitions CRUD, instances CRUD, simple in-memory engine with persistent instance state
+   * REST APIs, outbox with Kafka producer, simple authoring UI (JSON editor)
+   * Basic RBAC and auditing
+
+2. **Phase 2 (8-12 weeks)**
+
+   * Approval workflows, scheduling engine, graphical authoring UI
+   * Webhooks, subscription management, transactional outbox
+   * Observability (OTel + Prometheus)
+
+3. **Phase 3 (ongoing)**
+
+   * Temporal/Zeebe integration for heavy orchestrations
+   * Multi-tenant optimizations, performance tuning
+   * SDKs, richer UI, policy engine, full lifecycle migration tools
+
+---
+
+# Operational considerations & gotchas
+
+* Carefully design guard expression execution to avoid unsafe code execution (use a sandboxed expression evaluator).
+* Balance feature richness with performance: large numbers of scheduled transitions require a job-scheduler optimized with partitioning.
+* Ensure event schemas are versioned and backwards compatible.
+* Provide admin tools for replay/reconciliation when system drift occurs.
