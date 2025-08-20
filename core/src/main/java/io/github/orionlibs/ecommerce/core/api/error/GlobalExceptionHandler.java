@@ -1,6 +1,7 @@
 package io.github.orionlibs.ecommerce.core.api.error;
 
 import io.github.orionlibs.ecommerce.core.Logger;
+import io.github.orionlibs.ecommerce.core.api.idempotency.IdempotencyConflictException;
 import io.github.orionlibs.ecommerce.core.database.DuplicateRecordException;
 import io.github.orionlibs.ecommerce.core.database.ResourceNotFoundException;
 import java.time.OffsetDateTime;
@@ -83,6 +84,18 @@ public class GlobalExceptionHandler
         Logger.error("Access denied: {}", ex.getMessage());
         return ResponseEntity.status(apiError.status()).body(apiError);
     }*/
+
+
+    @ExceptionHandler(IdempotencyConflictException.class)
+    public ResponseEntity<APIError> handleIdempotencyConflict(IdempotencyConflictException e)
+    {
+        APIError apiError = new APIError(
+                        OffsetDateTime.now(),
+                        HttpStatus.UNPROCESSABLE_ENTITY.value(),
+                        "Idempotency Conflict: " + e.getMessage(),
+                        null);
+        return ResponseEntity.status(apiError.status()).body(apiError);
+    }
 
 
     @ExceptionHandler(Exception.class)

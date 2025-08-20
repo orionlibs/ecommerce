@@ -1,38 +1,3 @@
-```java
-@RestController
-@RequestMapping("/api/v1/instances")
-@RequiredArgsConstructor
-@Validated
-public class LifecycleInstanceController {
-
-    private final LifecycleEngineService lifecycleEngineService;
-
-    @PostMapping("/{id}/transitions")
-    public ResponseEntity<?> requestTransition(
-            @PathVariable("id") UUID instanceId,
-            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
-            @RequestBody @Valid TransitionRequest request) {
-        
-        // Idempotency handling would be implemented here, likely via a filter/aspect
-        LifecycleInstance updatedInstance = lifecycleEngineService.requestTransition(instanceId, request);
-        return ResponseEntity.ok(updatedInstance); // Map to an InstanceResponse DTO
-    }
-    
-    // ... other GET, POST endpoints
-}
-```
-
-### Next Steps & How to Run
-      * Use an API client (like Postman or cURL) to create a `LifecycleDefinition` in the database.
-      * Create a `LifecycleInstance` pointing to that definition.
-      * Call the `POST /api/v1/instances/{id}/transitions` endpoint
-      * Verify that the instance's state changes in the database
-      
-      
-      
-      
-Of course. As a software engineering expert specializing in Java 21 and Spring Boot 3, I will provide a comprehensive set of JUnit 5 tests for the specified Lifecycle Management System.
-
 The testing strategy will be divided into two main parts:
 
 1.  **Service Layer Unit Tests (`LifecycleEngineServiceTest`):** These tests will focus on the core business logic within the `LifecycleEngineService`. We will use Mockito to mock all external dependencies (repositories, outbox service) to ensure the service logic is tested in isolation. This allows us to verify state transitions, guard evaluations, and interactions with collaborators without needing a database or a full application context.

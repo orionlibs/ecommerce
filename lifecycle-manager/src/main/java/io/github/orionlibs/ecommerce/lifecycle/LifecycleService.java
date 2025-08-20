@@ -27,9 +27,9 @@ public class LifecycleService
 
 
     @Transactional
-    public LifecycleInstanceModel processStateTransition(String instanceId)
+    public LifecycleInstanceModel processStateTransition(UUID instanceId)
     {
-        LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(UUID.fromString(instanceId))
+        LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(instanceId)
                         .orElseThrow(() -> new RuntimeException("Instance not found"));
         LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
                         .orElseThrow(() -> new RuntimeException("Definition not found"));
