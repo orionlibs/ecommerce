@@ -1,17 +1,3 @@
-```sql
-CREATE TABLE lifecycle_definitions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    key VARCHAR(255) NOT NULL,
-    version INT NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    payload JSONB NOT NULL,
-    created_by VARCHAR(255) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (key, version, tenant_id)
-);
-```
-
-
 ```java
 @RestController
 @RequestMapping("/api/v1/instances")

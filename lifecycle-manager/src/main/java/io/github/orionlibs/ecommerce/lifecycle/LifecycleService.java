@@ -1,7 +1,6 @@
 package io.github.orionlibs.ecommerce.lifecycle;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.orionlibs.ecommerce.lifecycle.api.StateTransitionRequest;
 import io.github.orionlibs.ecommerce.lifecycle.model.Guard;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinition;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinitionModel;
@@ -28,14 +27,14 @@ public class LifecycleService
 
 
     @Transactional
-    public LifecycleInstanceModel processStateTransition(UUID instanceId, StateTransitionRequest request)
+    public LifecycleInstanceModel processStateTransition(String instanceId)
     {
-        LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(instanceId)
+        LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(UUID.fromString(instanceId))
                         .orElseThrow(() -> new RuntimeException("Instance not found"));
         LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
                         .orElseThrow(() -> new RuntimeException("Definition not found"));
         LifecycleDefinition definition = parseDefinition(definitionEntity.getPayload());
-        StateTransition transition = findTransition(definition, instance.getCurrentState(), request.transitionName());
+        StateTransition transition = findTransition(definition, instance.getCurrentState());
         checkGuards(transition, instance);
         //String oldState = instance.getCurrentState();
         instance.setCurrentState(transition.to());
@@ -62,13 +61,13 @@ public class LifecycleService
     }
 
 
-    private StateTransition findTransition(LifecycleDefinition definition, String fromState, String transitionName)
+    private StateTransition findTransition(LifecycleDefinition definition, String fromState)
     {
         return definition.transitions()
                         .stream()
-                        .filter(t -> t.name().equals(transitionName) && t.from().equals(fromState))
+                        .filter(t -> t.from().equals(fromState))
                         .findFirst()
-                        .orElseThrow(() -> new RuntimeException("Invalid transition '" + transitionName + "' from state '" + fromState + "'"));
+                        .orElseThrow(() -> new RuntimeException("Invalid transition from state '" + fromState + "'"));
     }
 
 

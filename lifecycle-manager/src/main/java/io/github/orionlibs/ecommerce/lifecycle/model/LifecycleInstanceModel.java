@@ -30,7 +30,7 @@ public class LifecycleInstanceModel implements OrionModel
     @Column(nullable = false)
     private String definitionKey;
     @Column(nullable = false)
-    private Integer definitionVersion;
+    private int definitionVersion;
     @Column(nullable = false)
     private String currentState;
     @CreationTimestamp

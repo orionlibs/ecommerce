@@ -8,6 +8,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import java.time.LocalDateTime;
 import java.util.UUID;
 import lombok.Getter;
@@ -18,7 +19,8 @@ import org.hibernate.annotations.UpdateTimestamp;
 @Entity
 @Table(name = "lifecycle_definitions", schema = "uns", indexes = {
                 @Index(name = "idx_uns_lifecycle_definitions", columnList = "id")
-})
+},
+                uniqueConstraints = @UniqueConstraint(columnNames = {"key", "version"}))
 @Getter
 @Setter
 public class LifecycleDefinitionModel implements OrionModel
