@@ -66,12 +66,13 @@ dependencies {
     //api("com.fasterxml.jackson.core:jackson-annotations")
     //api("com.fasterxml.jackson.core:jackson-core")
 
+    runtimeOnly("com.h2database:h2")
     testImplementation(platform("org.junit:junit-bom:5.13.3"))
     testImplementation("org.junit.jupiter:junit-jupiter-api")
     testImplementation("org.junit.platform:junit-platform-launcher")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
     testImplementation("org.assertj:assertj-core:3.27.4")
-    //testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
 }
 
 tasks.named<Test>("test") {

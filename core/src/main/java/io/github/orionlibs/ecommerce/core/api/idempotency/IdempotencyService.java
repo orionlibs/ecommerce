@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class IdempotencyService
@@ -74,9 +75,24 @@ public class IdempotencyService
     }
 
 
-    @Scheduled(fixedDelay = 3600000) // Run every hour
+    @Scheduled(fixedDelay = 3600000) //runs every hour
+    @Transactional
     public void cleanupExpiredRecords()
     {
         dao.deleteExpiredRecords(LocalDateTime.now());
+    }
+
+
+    @Transactional
+    public IdempotencyRecordModel save(IdempotencyRecordModel model)
+    {
+        return dao.saveAndFlush(model);
+    }
+
+
+    @Transactional
+    public void deleteAll()
+    {
+        dao.deleteAll();
     }
 }

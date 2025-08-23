@@ -1,53 +1,8 @@
-The testing strategy will be divided into two main parts:
-
-1.  **Service Layer Unit Tests (`LifecycleEngineServiceTest`):** These tests will focus on the core business logic within the `LifecycleEngineService`. We will use Mockito to mock all external dependencies (repositories, outbox service) to ensure the service logic is tested in isolation. This allows us to verify state transitions, guard evaluations, and interactions with collaborators without needing a database or a full application context.
-
-2.  **Web Layer Slice Tests (`LifecycleInstanceControllerTest`):** These tests will focus on the API layer, specifically the `LifecycleInstanceController`. We will use `@WebMvcTest` to create a lightweight Spring context containing only the web-layer components. The service layer (`LifecycleEngineService`) will be mocked. This approach allows us to test request handling, deserialization of the request body, validation constraints (`@Valid`), and serialization of the response.
-
-Here are the complete JUnit 5 test classes.
-
------
-
-### 1\. `pom.xml` Dependencies
-
-To run these tests, you would need the following dependencies in your `pom.xml` file:
-
 ```xml
 <dependencies>
     <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-web</artifactId>
-    </dependency>
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-data-jpa</artifactId>
-    </dependency>
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-
-    <dependency>
         <groupId>com.fasterxml.jackson.dataformat</groupId>
         <artifactId>jackson-dataformat-yaml</artifactId>
-    </dependency>
-
-    <dependency>
-        <groupId>org.postgresql</groupId>
-        <artifactId>postgresql</artifactId>
-        <scope>runtime</scope>
-    </dependency>
-
-    <dependency>
-        <groupId>org.projectlombok</groupId>
-        <artifactId>lombok</artifactId>
-        <optional>true</optional>
-    </dependency>
-
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-test</artifactId>
-        <scope>test</scope>
     </dependency>
 </dependencies>
 ```
