@@ -1,8 +1,7 @@
-package io.github.orionlibs.ecommerce.lifecycle;
+package io.github.orionlibs.ecommerce.core.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.orionlibs.ecommerce.core.lifecycle.LifecycleDefinition;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
