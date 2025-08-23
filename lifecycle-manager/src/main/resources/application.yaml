@@ -63,34 +63,3 @@ spring:
     properties:
       hibernate:
         format_sql: true
-
-
-
-
----
-spring:
-  config:
-    activate:
-      on-profile: test
-
-  datasource:
-    driver-class-name: org.h2.Driver
-    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=MySQL;INIT=CREATE SCHEMA IF NOT EXISTS uns
-    username: sa
-    password:
-  jpa:
-    database: H2
-    hibernate:
-      ddl-auto: create-drop
-      dialect: org.hibernate.dialect.H2Dialect
-    #  show-sql: true
-    properties:
-      hibernate.default_schema: uns
-      hibernate.format_sql: true
-
-  springdoc:
-    packagesToScan: io.github.orionlibs.ecommerce.lifecycle.api
-    writer-with-order-by-keys: true
-    api-docs:
-      enabled: true
-      path: /api/docs

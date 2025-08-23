@@ -1,0 +1,71 @@
+package de.hybris.platform.servicelayer.search.internal.resolver.impl;
+
+import com.google.common.base.Preconditions;
+import de.hybris.platform.core.HybrisEnumValue;
+import de.hybris.platform.core.PK;
+import de.hybris.platform.servicelayer.internal.model.impl.DefaultModelService;
+import de.hybris.platform.servicelayer.model.ModelService;
+import de.hybris.platform.servicelayer.search.internal.resolver.ItemObjectResolver;
+import java.util.List;
+import org.apache.commons.collections.CollectionUtils;
+import org.springframework.beans.factory.annotation.Required;
+
+public class DefaultMultiModelResolver implements ItemObjectResolver<Object>
+{
+    private ModelService modelService;
+
+
+    @Required
+    public void setModelService(ModelService modelService)
+    {
+        this.modelService = modelService;
+    }
+
+
+    public Object resolve(int expectedColumnIndex, Object cachedIdentifier, List<Class<?>> expectedClassList)
+    {
+        if(cachedIdentifier instanceof de.hybris.platform.jalo.enumeration.EnumerationValue || isEnumValuePK(cachedIdentifier))
+        {
+            return resolveEnumerationValue(expectedColumnIndex, cachedIdentifier, expectedClassList);
+        }
+        return (cachedIdentifier instanceof PK) ? this.modelService.get((PK)cachedIdentifier) : this.modelService.get(cachedIdentifier);
+    }
+
+
+    private boolean isEnumValuePK(Object cachedIdentifier)
+    {
+        return (cachedIdentifier instanceof PK && ((PK)cachedIdentifier).getTypeCode() == 91);
+    }
+
+
+    private Object resolveEnumerationValue(int expectedColumnIndex, Object cachedIdentifier, List<Class<?>> expectedClassList)
+    {
+        if(CollectionUtils.isNotEmpty(expectedClassList))
+        {
+            if(HybrisEnumValue.class.isAssignableFrom(expectedClassList.get(expectedColumnIndex)))
+            {
+                return this.modelService.get(cachedIdentifier);
+            }
+        }
+        return this.modelService.get(cachedIdentifier, "EnumerationValue");
+    }
+
+
+    public Object resolve(Object cachedIdentifier, List<Class<?>> expectedClassList)
+    {
+        return cachedIdentifier;
+    }
+
+
+    public Object unresolve(Object model)
+    {
+        return this.modelService.toPersistenceLayer(model);
+    }
+
+
+    public boolean preloadItems(List<PK> pks)
+    {
+        Preconditions.checkState(this.modelService instanceof DefaultModelService);
+        return ((DefaultModelService)this.modelService).preloadItems(pks);
+    }
+}

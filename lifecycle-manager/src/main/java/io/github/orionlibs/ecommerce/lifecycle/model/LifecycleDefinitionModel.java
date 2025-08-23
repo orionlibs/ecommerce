@@ -7,6 +7,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
+import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import java.time.LocalDateTime;
@@ -33,7 +34,8 @@ public class LifecycleDefinitionModel implements OrionModel
     private String key;
     @Column(nullable = false)
     private String name;
-    @Column(columnDefinition = "jsonb", nullable = false)
+    @Lob
+    @Column(nullable = false)
     private String payload;
     @Column(nullable = false)
     private int version;

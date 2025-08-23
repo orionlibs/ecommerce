@@ -1,0 +1,6 @@
+package de.hybris.platform.cms2.common.predicates;
+
+@Deprecated(since = "2005", forRemoval = true)
+public class ProductPageTypePredicate extends GenericTypePredicate
+{
+}

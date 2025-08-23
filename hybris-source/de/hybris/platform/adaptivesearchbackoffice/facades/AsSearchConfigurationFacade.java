@@ -1,0 +1,10 @@
+package de.hybris.platform.adaptivesearchbackoffice.facades;
+
+import de.hybris.platform.adaptivesearch.model.AbstractAsConfigurableSearchConfigurationModel;
+import de.hybris.platform.adaptivesearchbackoffice.data.NavigationContextData;
+import de.hybris.platform.adaptivesearchbackoffice.data.SearchContextData;
+
+public interface AsSearchConfigurationFacade
+{
+    AbstractAsConfigurableSearchConfigurationModel getOrCreateSearchConfiguration(NavigationContextData paramNavigationContextData, SearchContextData paramSearchContextData);
+}

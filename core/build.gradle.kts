@@ -55,7 +55,7 @@ dependencies {
     //runtimeOnly("io.jsonwebtoken:jjwt-jackson:0.12.6")
     //implementation("jakarta.xml.bind:jakarta.xml.bind-api:4.0.2")
     //implementation("io.micrometer:micrometer-core")
-    //implementation("io.rest-assured:rest-assured")
+    implementation("io.rest-assured:rest-assured")
     compileOnly("org.projectlombok:lombok")
     annotationProcessor("org.projectlombok:lombok")
     implementation("org.slf4j:slf4j-api")

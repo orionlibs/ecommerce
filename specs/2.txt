@@ -1,9 +1,3 @@
-* produce a prioritized checklist of the first 20 services with required endpoints, data models and sample events; **or**
-* generate a starter Spring Boot 3 microservice template (Java 21) that includes logging, metrics, OpenAPI, tests and a Dockerfile; **or**
-* sketch the event-topic schema and a recommended Kafka topic naming/partitioning strategy for the e-commerce flows.
-
-# Core infrastructure & platform services
-
 1. **API Gateway** — edge gateway that routes, auth-terminates, rate-limits and performs request/response transformations.
 2. **Service Discovery** — dynamic registry for service instances (e.g., replaceable with Consul/Eureka).
 3. **Config Service** — centralized configuration (profiles, runtime reloading, feature toggles fallback).

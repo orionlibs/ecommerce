@@ -1,0 +1,60 @@
+package de.hybris.platform.adaptivesearch.strategies;
+
+import de.hybris.platform.adaptivesearch.model.AbstractAsBoostItemConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AbstractAsFacetConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AbstractAsFacetValueConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AbstractAsSearchConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AbstractAsSearchProfileModel;
+import de.hybris.platform.adaptivesearch.model.AbstractAsSortConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AsCategoryAwareSearchConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AsFacetRangeModel;
+import de.hybris.platform.adaptivesearch.model.AsSimpleSearchConfigurationModel;
+import de.hybris.platform.adaptivesearch.model.AsSortExpressionModel;
+import de.hybris.platform.core.model.ItemModel;
+
+public interface AsItemModelHelper
+{
+    String generateItemIdentifier(ItemModel paramItemModel);
+
+
+    String decorateIdentifier(String paramString);
+
+
+    AbstractAsSearchProfileModel getSearchProfileForSearchConfiguration(AbstractAsSearchConfigurationModel paramAbstractAsSearchConfigurationModel);
+
+
+    AbstractAsSearchConfigurationModel getSearchConfigurationForFacetConfiguration(AbstractAsFacetConfigurationModel paramAbstractAsFacetConfigurationModel);
+
+
+    AbstractAsFacetConfigurationModel getFacetConfigurationForFacetValueConfiguration(AbstractAsFacetValueConfigurationModel paramAbstractAsFacetValueConfigurationModel);
+
+
+    AbstractAsSearchConfigurationModel getSearchConfigurationForBoostItemConfiguration(AbstractAsBoostItemConfigurationModel paramAbstractAsBoostItemConfigurationModel);
+
+
+    AbstractAsSearchConfigurationModel getSearchConfigurationForSortConfiguration(AbstractAsSortConfigurationModel paramAbstractAsSortConfigurationModel);
+
+
+    String generateCategoryAwareSearchConfigurationUniqueIdx(AsCategoryAwareSearchConfigurationModel paramAsCategoryAwareSearchConfigurationModel);
+
+
+    String generateSimpleSearchConfigurationUniqueIdx(AsSimpleSearchConfigurationModel paramAsSimpleSearchConfigurationModel);
+
+
+    String generateFacetConfigurationUniqueIdx(AbstractAsFacetConfigurationModel paramAbstractAsFacetConfigurationModel);
+
+
+    String generateFacetValueConfigurationUniqueIdx(AbstractAsFacetValueConfigurationModel paramAbstractAsFacetValueConfigurationModel);
+
+
+    String generateFacetRangeUniqueIdx(AsFacetRangeModel paramAsFacetRangeModel);
+
+
+    String generateBoostItemConfigurationUniqueIdx(AbstractAsBoostItemConfigurationModel paramAbstractAsBoostItemConfigurationModel);
+
+
+    String generateSortConfigurationUniqueIdx(AbstractAsSortConfigurationModel paramAbstractAsSortConfigurationModel);
+
+
+    String generateSortExpressionUniqueIdx(AsSortExpressionModel paramAsSortExpressionModel);
+}

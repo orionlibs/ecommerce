@@ -8,4 +8,8 @@ public record LifecycleDefinition(String key,
                                   List<String> states,
                                   List<StateTransition> transitions)
 {
+    public String getFirstState()
+    {
+        return states.getFirst();
+    }
 }
