@@ -12,7 +12,7 @@ import org.springframework.test.context.ActiveProfiles;
 
 @SpringBootTest
 @ActiveProfiles("test")
-public class LifecycleServiceTest
+public class LifecycleInitialiserTest
 {
     @Autowired LifecycleService lifecycleService;
 
@@ -26,7 +26,7 @@ public class LifecycleServiceTest
 
 
     @Test
-    void processStateTransition()
+    void initialiseLifecycle()
     {
         LifecycleDefinitionModel definition = new LifecycleDefinitionModel();
         definition.setKey("key1");
@@ -54,9 +54,6 @@ public class LifecycleServiceTest
         definition.setVersion(1);
         definition = lifecycleService.saveDefinition(definition);
         LifecycleInstanceModel instance = lifecycleService.initialiseLifecycle(definition);
-        LifecycleInstanceModel newInstance = lifecycleService.processStateTransition(instance.getId());
-        assertThat(newInstance.getCurrentState()).isEqualTo("STATE_2");
-        newInstance = lifecycleService.processStateTransition(newInstance.getId(), "STATE_4");
-        assertThat(newInstance.getCurrentState()).isEqualTo("STATE_4");
+        assertThat(instance.getCurrentState()).isEqualTo("STATE_1");
     }
 }

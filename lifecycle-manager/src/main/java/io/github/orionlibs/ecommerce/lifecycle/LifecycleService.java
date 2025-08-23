@@ -23,18 +23,14 @@ public class LifecycleService
     @Autowired private LifecycleDefinitionsDAO lifecycleDefinitionsDAO;
     @Autowired private StateTransitionFinder stateTransitionFinder;
     @Autowired private LifecycleDefinitionParser lifecycleDefinitionParser;
+    @Autowired private LifecycleInitialiser lifecycleInitialiser;
     @Resource(name = "yamlObjectMapper") private ObjectMapper yamlMapper;
 
 
     @Transactional
     public LifecycleInstanceModel initialiseLifecycle(LifecycleDefinitionModel definitionEntity)
     {
-        LifecycleDefinition definition = lifecycleDefinitionParser.parseDefinition(definitionEntity.getPayload());
-        LifecycleInstanceModel instance = new LifecycleInstanceModel();
-        instance.setDefinitionKey(definitionEntity.getKey());
-        instance.setDefinitionVersion(definitionEntity.getVersion());
-        instance.setCurrentState(definition.getFirstState());
-        return lifecycleInstancesDAO.save(instance);
+        return lifecycleInitialiser.initialiseLifecycle(definitionEntity);
     }
 
 
