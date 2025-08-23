@@ -50,17 +50,17 @@ public class IdempotencyAspect
         {
             return pjp.proceed();
         }
-        Optional<IdempotencyRecordModel> existing = idempotencyService.findExistingRecord(idempotencyKey, endpoint);
+        Optional<IdempotencyRecordModel> existing = idempotencyService.getRecord(idempotencyKey, endpoint);
         if(existing.isPresent())
         {
             IdempotencyRecordModel record = existing.get();
-            if(!idempotencyService.isRequestConsistent(record, request))
+            if(!idempotencyService.isRequestConsistentWithRecord(record, request))
             {
                 throw new IdempotencyConflictException("Idempotency key reused with different request body");
             }
             return buildStoredResponse(record);
         }
-        IdempotencyRecordModel record = idempotencyService.createRecord(idempotencyKey, endpoint, request);
+        IdempotencyRecordModel record = idempotencyService.save(idempotencyKey, endpoint, request);
         try
         {
             Object result = pjp.proceed();
@@ -68,7 +68,7 @@ public class IdempotencyAspect
             {
                 HttpHeaders responseHeaders = new HttpHeaders();
                 responseHeaders.add("Idempotency-Key", idempotencyKey);
-                idempotencyService.updateRecordWithResponse(
+                idempotencyService.update(
                                 record,
                                 respEntity.getStatusCodeValue(),
                                 objectMapper.writeValueAsString(respEntity.getBody()),
@@ -80,7 +80,7 @@ public class IdempotencyAspect
             {
                 HttpHeaders responseHeaders = new HttpHeaders();
                 responseHeaders.add("Idempotency-Key", idempotencyKey);
-                idempotencyService.updateRecordWithResponse(
+                idempotencyService.update(
                                 record,
                                 200,
                                 objectMapper.writeValueAsString(result),
@@ -93,7 +93,7 @@ public class IdempotencyAspect
         {
             HttpHeaders responseHeaders = new HttpHeaders();
             responseHeaders.add("Idempotency-Key", idempotencyKey);
-            idempotencyService.updateRecordWithResponse(
+            idempotencyService.update(
                             record,
                             422,
                             objectMapper.writeValueAsString(Map.of("error", e.getMessage())),

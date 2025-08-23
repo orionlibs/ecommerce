@@ -73,7 +73,7 @@ public class IdempotencyServiceTest
         when(objectMapper.writeValueAsString(requestBody)).thenReturn(json);
         // dao.save should return its argument
         when(dao.save(any(IdempotencyRecordModel.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        IdempotencyRecordModel saved = service.createRecord("key-1", "/ep/1", requestBody);
+        IdempotencyRecordModel saved = service.save("key-1", "/ep/1", requestBody);
         ArgumentCaptor<IdempotencyRecordModel> captor = ArgumentCaptor.forClass(IdempotencyRecordModel.class);
         verify(dao, times(1)).save(captor.capture());
         IdempotencyRecordModel captured = captor.getValue();
@@ -92,7 +92,7 @@ public class IdempotencyServiceTest
         Object requestBody = Map.of("b", 2);
         when(objectMapper.writeValueAsString(requestBody)).thenThrow(new RuntimeException("fail-json"));
         when(dao.save(any(IdempotencyRecordModel.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        IdempotencyRecordModel saved = service.createRecord("key-2", "/ep/2", requestBody);
+        IdempotencyRecordModel saved = service.save("key-2", "/ep/2", requestBody);
         ArgumentCaptor<IdempotencyRecordModel> captor = ArgumentCaptor.forClass(IdempotencyRecordModel.class);
         verify(dao).save(captor.capture());
         IdempotencyRecordModel captured = captor.getValue();
@@ -102,7 +102,7 @@ public class IdempotencyServiceTest
 
 
     @Test
-    void updateRecordWithResponse_serializesBodyAndHeadersAndSaves() throws Exception
+    void update_serializesBodyAndHeadersAndSaves() throws Exception
     {
         IdempotencyRecordModel record = mock(IdempotencyRecordModel.class);
         // objectMapper will be called twice: once for body, once for headers map
@@ -110,7 +110,7 @@ public class IdempotencyServiceTest
         when(objectMapper.writeValueAsString(Map.of("X", "v"))).thenReturn("{\"X\":\"v\"}");
         HttpHeaders headers = new HttpHeaders();
         headers.add("X", "v");
-        service.updateRecordWithResponse(record, 201, Map.of("ok", true), headers);
+        service.update(record, 201, Map.of("ok", true), headers);
         verify(record).setResponseStatus(201);
         verify(record).setResponseBody("{\"ok\":true}");
         verify(record).setResponseHeaders("{\"X\":\"v\"}");
@@ -119,13 +119,13 @@ public class IdempotencyServiceTest
 
 
     @Test
-    void updateRecordWithResponse_whenSerializationFails_setsFallbackValuesAndSaves() throws Exception
+    void update_whenSerializationFails_setsFallbackValuesAndSaves() throws Exception
     {
         IdempotencyRecordModel record = mock(IdempotencyRecordModel.class);
         when(objectMapper.writeValueAsString(any())).thenThrow(new RuntimeException("boom"));
         HttpHeaders headers = new HttpHeaders();
         headers.add("H", "v");
-        service.updateRecordWithResponse(record, 500, Map.of("x", 1), headers);
+        service.update(record, 500, Map.of("x", 1), headers);
         verify(record).setResponseStatus(500);
         verify(record).setResponseBody("Error serializing response");
         verify(record).setResponseHeaders("{}");
@@ -142,10 +142,10 @@ public class IdempotencyServiceTest
         String expectedHash = DigestUtils.sha256Hex(json);
         IdempotencyRecordModel existing = mock(IdempotencyRecordModel.class);
         when(existing.getRequestHash()).thenReturn(expectedHash);
-        assertTrue(service.isRequestConsistent(existing, requestBody));
+        assertTrue(service.isRequestConsistentWithRecord(existing, requestBody));
         // now simulate mismatch
         when(existing.getRequestHash()).thenReturn("some-other-hash");
-        assertFalse(service.isRequestConsistent(existing, requestBody));
+        assertFalse(service.isRequestConsistentWithRecord(existing, requestBody));
     }
 
 

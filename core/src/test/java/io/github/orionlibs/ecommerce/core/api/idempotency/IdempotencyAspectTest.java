@@ -97,8 +97,8 @@ public class IdempotencyAspectTest
         when(record.getResponseBody()).thenReturn("{\"result\":\"ok\"}");
         when(record.getResponseStatus()).thenReturn(200);
         when(record.getIdempotencyKey()).thenReturn("key-123");
-        when(idempotencyService.findExistingRecord("key-123", "GET /api/test")).thenReturn(Optional.of(record));
-        when(idempotencyService.isRequestConsistent(record, request)).thenReturn(true);
+        when(idempotencyService.getRecord("key-123", "GET /api/test")).thenReturn(Optional.of(record));
+        when(idempotencyService.isRequestConsistentWithRecord(record, request)).thenReturn(true);
         ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
         Object result = aspect.aroundIdempotent(pjp);
         //the aspect should return a ResponseEntity reconstructed from the stored payload
@@ -111,8 +111,8 @@ public class IdempotencyAspectTest
         assertEquals("true", resp.getHeaders().getFirst("X-Idempotent-Replay"));
         //the controller must not be invoked
         verify(pjp, never()).proceed();
-        verify(idempotencyService, times(1)).findExistingRecord("key-123", "GET /api/test");
-        verify(idempotencyService, times(1)).isRequestConsistent(record, request);
+        verify(idempotencyService, times(1)).getRecord("key-123", "GET /api/test");
+        verify(idempotencyService, times(1)).isRequestConsistentWithRecord(record, request);
     }
 
 
@@ -125,14 +125,14 @@ public class IdempotencyAspectTest
         when(request.getRequestURI()).thenReturn("/api/test");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
         IdempotencyRecordModel record = mock(IdempotencyRecordModel.class);
-        when(idempotencyService.findExistingRecord("key-456", "GET /api/test"))
+        when(idempotencyService.getRecord("key-456", "GET /api/test"))
                         .thenReturn(Optional.of(record));
-        when(idempotencyService.isRequestConsistent(record, request)).thenReturn(false);
+        when(idempotencyService.isRequestConsistentWithRecord(record, request)).thenReturn(false);
         ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
         assertThrows(IdempotencyConflictException.class, () -> aspect.aroundIdempotent(pjp));
         verify(pjp, never()).proceed();
-        verify(idempotencyService, times(1)).findExistingRecord("key-456", "GET /api/test");
-        verify(idempotencyService, times(1)).isRequestConsistent(record, request);
+        verify(idempotencyService, times(1)).getRecord("key-456", "GET /api/test");
+        verify(idempotencyService, times(1)).isRequestConsistentWithRecord(record, request);
     }
 
 
@@ -144,10 +144,10 @@ public class IdempotencyAspectTest
         when(request.getMethod()).thenReturn("GET");
         when(request.getRequestURI()).thenReturn("/api/do");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
-        when(idempotencyService.findExistingRecord("key-create", "GET /api/do"))
+        when(idempotencyService.getRecord("key-create", "GET /api/do"))
                         .thenReturn(Optional.empty());
         IdempotencyRecordModel createdRecord = mock(IdempotencyRecordModel.class);
-        when(idempotencyService.createRecord(eq("key-create"), eq("GET /api/do"), eq(request)))
+        when(idempotencyService.save(eq("key-create"), eq("GET /api/do"), eq(request)))
                         .thenReturn(createdRecord);
         // controller returns a ResponseEntity
         ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
@@ -157,7 +157,7 @@ public class IdempotencyAspectTest
         Object result = aspect.aroundIdempotent(pjp);
         assertSame(controllerResponse, result);
         // verify that updateRecordWithResponse is called with serialized body and headers
-        verify(idempotencyService, times(1)).updateRecordWithResponse(
+        verify(idempotencyService, times(1)).update(
                         eq(createdRecord),
                         eq(201),
                         anyString(),
@@ -175,10 +175,10 @@ public class IdempotencyAspectTest
         when(request.getMethod()).thenReturn("GET");
         when(request.getRequestURI()).thenReturn("/api/fail");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
-        when(idempotencyService.findExistingRecord("key-fail", "GET /api/fail"))
+        when(idempotencyService.getRecord("key-fail", "GET /api/fail"))
                         .thenReturn(Optional.empty());
         IdempotencyRecordModel createdRecord = mock(IdempotencyRecordModel.class);
-        when(idempotencyService.createRecord(eq("key-fail"), eq("GET /api/fail"), eq(request)))
+        when(idempotencyService.save(eq("key-fail"), eq("GET /api/fail"), eq(request)))
                         .thenReturn(createdRecord);
         ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
         RuntimeException failure = new RuntimeException("boom");
@@ -186,7 +186,7 @@ public class IdempotencyAspectTest
         RuntimeException thrown = assertThrows(RuntimeException.class, () -> aspect.aroundIdempotent(pjp));
         assertSame(failure, thrown);
         // verify failure update persisted with error message
-        verify(idempotencyService, times(1)).updateRecordWithResponse(
+        verify(idempotencyService, times(1)).update(
                         eq(createdRecord),
                         eq(422),
                         contains("boom"),

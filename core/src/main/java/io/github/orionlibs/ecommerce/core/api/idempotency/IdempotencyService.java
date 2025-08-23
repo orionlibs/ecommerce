@@ -1,14 +1,12 @@
 package io.github.orionlibs.ecommerce.core.api.idempotency;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.orionlibs.ecommerce.core.api.idempotency.model.IdempotencyRecordModel;
 import io.github.orionlibs.ecommerce.core.api.idempotency.model.IdempotencyRecordsDAO;
-import java.time.LocalDateTime;
 import java.util.Optional;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,27 +15,55 @@ public class IdempotencyService
 {
     @Autowired private IdempotencyRecordsDAO dao;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private APIRequestBodyHashCalculator apiRequestBodyHashCalculator;
 
 
-    public Optional<IdempotencyRecordModel> findExistingRecord(String idempotencyKey, String endpoint)
+    @Transactional(readOnly = true)
+    public Optional<IdempotencyRecordModel> getRecord(String idempotencyKey, String endpoint)
     {
-        if(idempotencyKey == null || idempotencyKey.trim().isEmpty())
-        {
-            return Optional.empty();
-        }
         return dao.findByIdempotencyKeyAndEndpoint(idempotencyKey, endpoint);
     }
 
 
-    public IdempotencyRecordModel createRecord(String idempotencyKey, String endpoint, Object requestBody)
+    public boolean isRequestConsistentWithRecord(IdempotencyRecordModel existingRecord, Object requestBody)
     {
-        String requestHash = calculateHash(requestBody);
-        IdempotencyRecordModel record = new IdempotencyRecordModel(idempotencyKey, endpoint, requestHash);
-        return dao.save(record);
+        try
+        {
+            String currentRequestHash = apiRequestBodyHashCalculator.calculateHash(requestBody);
+            return currentRequestHash.equals(existingRecord.getRequestHash());
+        }
+        catch(JsonProcessingException e)
+        {
+            return false;
+        }
     }
 
 
-    public void updateRecordWithResponse(IdempotencyRecordModel record, int status, Object responseBody, HttpHeaders headers)
+    @Transactional
+    public IdempotencyRecordModel save(String idempotencyKey, String endpoint, Object requestBody)
+    {
+        try
+        {
+            String requestHash = apiRequestBodyHashCalculator.calculateHash(requestBody);
+            IdempotencyRecordModel record = new IdempotencyRecordModel(idempotencyKey, endpoint, requestHash);
+            return dao.save(record);
+        }
+        catch(JsonProcessingException e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+
+    @Transactional
+    public IdempotencyRecordModel save(IdempotencyRecordModel model)
+    {
+        return dao.saveAndFlush(model);
+    }
+
+
+    @Transactional
+    public void update(IdempotencyRecordModel record, int status, Object responseBody, HttpHeaders headers)
     {
         record.setResponseStatus(status);
         try
@@ -51,42 +77,6 @@ public class IdempotencyService
             record.setResponseHeaders("{}");
         }
         dao.save(record);
-    }
-
-
-    public boolean isRequestConsistent(IdempotencyRecordModel existingRecord, Object requestBody)
-    {
-        String currentRequestHash = calculateHash(requestBody);
-        return currentRequestHash.equals(existingRecord.getRequestHash());
-    }
-
-
-    private String calculateHash(Object obj)
-    {
-        try
-        {
-            String json = objectMapper.writeValueAsString(obj);
-            return DigestUtils.sha256Hex(json);
-        }
-        catch(Exception e)
-        {
-            return "hash-error";
-        }
-    }
-
-
-    @Scheduled(fixedDelay = 3600000) //runs every hour
-    @Transactional
-    public void cleanupExpiredRecords()
-    {
-        dao.deleteExpiredRecords(LocalDateTime.now());
-    }
-
-
-    @Transactional
-    public IdempotencyRecordModel save(IdempotencyRecordModel model)
-    {
-        return dao.saveAndFlush(model);
     }
 
 
