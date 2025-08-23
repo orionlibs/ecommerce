@@ -24,7 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping(ControllerUtils.baseAPIPath)
 @Validated
 @Tag(name = "Lifecycle manager", description = "Lifecycle manager")
-public class SaveStateTransitionAPIController extends APIService
+public class SaveStateTransitionWithProvidedNextStateAPIController extends APIService
 {
     @Autowired private LifecycleService lifecycleService;
 
@@ -32,23 +32,37 @@ public class SaveStateTransitionAPIController extends APIService
     @Operation(
                     summary = "Save state transition",
                     description = "Save state transition",
-                    parameters = @io.swagger.v3.oas.annotations.Parameter(
+                    parameters = {@io.swagger.v3.oas.annotations.Parameter(
                                     name = "instanceID",
                                     description = "The ID of the lifecycle instance whose state we want to update",
                                     required = true,
                                     in = ParameterIn.PATH,
                                     schema = @Schema(type = "string")
                     ),
+                                    @io.swagger.v3.oas.annotations.Parameter(
+                                                    name = "targetStateName",
+                                                    description = "The name of the lifecycle state we want to transition to",
+                                                    required = true,
+                                                    in = ParameterIn.PATH,
+                                                    schema = @Schema(type = "string")
+                                    )},
                     responses = {@ApiResponse(responseCode = "201", description = "State transition saved"),
                                     @ApiResponse(responseCode = "400", description = "Invalid input")}
     )
-    @PostMapping(value = "/lifecycles/instances/{instanceID}/transitions", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    @PostMapping(value = "/lifecycles/instances/{instanceID}/transitions/target-states/{targetStateName}", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     //@PreAuthorize("hasAuthority('DATABASE_MANAGER')")
     @Idempotent
-    public ResponseEntity<Map<String, Object>> saveStateTransition(@PathVariable UUID instanceID)
+    public ResponseEntity<Map<String, Object>> saveStateTransitionWithProvidedNextState(@PathVariable UUID instanceID, @PathVariable String targetStateName)
     {
-        lifecycleService.processStateTransition(instanceID);
-        //the idempotency aspect will add the Idempotency-Key header in stored responses and persist it
-        return ResponseEntity.created(null).body(Map.of("is_state_transition_saved", true));
+        try
+        {
+            lifecycleService.processStateTransition(instanceID, targetStateName);
+            //the idempotency aspect will add the Idempotency-Key header in stored responses and persist it
+            return ResponseEntity.created(null).body(Map.of("is_state_transition_saved", true));
+        }
+        catch(Exception e)
+        {
+            return ResponseEntity.created(null).body(Map.of("is_state_transition_saved", false));
+        }
     }
 }

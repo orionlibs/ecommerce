@@ -53,7 +53,7 @@ public class LifecycleService
         }
         else
         {
-            return instance;
+            throw new RuntimeException("Transition not found");
         }
     }
 
@@ -75,7 +75,7 @@ public class LifecycleService
         }
         else
         {
-            return instance;
+            throw new RuntimeException("Transition not found");
         }
     }
 

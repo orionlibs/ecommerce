@@ -19,7 +19,7 @@ import org.springframework.test.context.ActiveProfiles;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-class SaveStateTransitionAPIControllerTest
+class SaveStateTransitionWithProvidedNextStateAPIControllerTest
 {
     @LocalServerPort int port;
     @Autowired LifecycleService lifecycleService;
@@ -38,7 +38,7 @@ class SaveStateTransitionAPIControllerTest
 
 
     @Test
-    void saveStateTransition()
+    void saveStateTransitionWithAutomaticDetectionOfNextState()
     {
         LifecycleDefinitionModel definition = new LifecycleDefinitionModel();
         definition.setKey("key1");
@@ -66,7 +66,7 @@ class SaveStateTransitionAPIControllerTest
         definition.setVersion(1);
         definition = lifecycleService.saveDefinition(definition);
         LifecycleInstanceModel instance = lifecycleService.initialiseLifecycle(definition);
-        RestAssured.baseURI += "/" + instance.getId().toString() + "/transitions";
+        RestAssured.baseURI += "/" + instance.getId().toString() + "/transitions/target-states/STATE_2";
         Response response = apiUtils.makePostAPICall(null, headers);
         assertThat(response.statusCode()).isEqualTo(201);
     }
