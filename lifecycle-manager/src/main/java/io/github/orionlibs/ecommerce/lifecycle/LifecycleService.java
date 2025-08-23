@@ -1,12 +1,12 @@
 package io.github.orionlibs.ecommerce.lifecycle;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinition;
+import io.github.orionlibs.ecommerce.core.lifecycle.LifecycleDefinition;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinitionModel;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinitionsDAO;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleInstanceModel;
 import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleInstancesDAO;
-import io.github.orionlibs.ecommerce.lifecycle.model.StateTransition;
+import io.github.orionlibs.ecommerce.core.lifecycle.StateTransition;
 import jakarta.annotation.Resource;
 import java.util.Optional;
 import java.util.UUID;

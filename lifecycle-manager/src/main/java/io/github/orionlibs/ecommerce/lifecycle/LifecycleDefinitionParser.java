@@ -1,7 +1,7 @@
 package io.github.orionlibs.ecommerce.lifecycle;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinition;
+import io.github.orionlibs.ecommerce.core.lifecycle.LifecycleDefinition;
 import jakarta.annotation.Resource;
 import lombok.SneakyThrows;
 import org.springframework.stereotype.Component;

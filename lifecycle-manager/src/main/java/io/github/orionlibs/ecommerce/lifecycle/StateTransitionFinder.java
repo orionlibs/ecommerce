@@ -1,7 +1,7 @@
 package io.github.orionlibs.ecommerce.lifecycle;
 
-import io.github.orionlibs.ecommerce.lifecycle.model.LifecycleDefinition;
-import io.github.orionlibs.ecommerce.lifecycle.model.StateTransition;
+import io.github.orionlibs.ecommerce.core.lifecycle.LifecycleDefinition;
+import io.github.orionlibs.ecommerce.core.lifecycle.StateTransition;
 import java.util.Optional;
 import org.springframework.stereotype.Component;
 

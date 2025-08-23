@@ -1,4 +1,4 @@
-package io.github.orionlibs.ecommerce.lifecycle.model;
+package io.github.orionlibs.ecommerce.core.lifecycle;
 
 public record StateTransition(String name,
                               String from,

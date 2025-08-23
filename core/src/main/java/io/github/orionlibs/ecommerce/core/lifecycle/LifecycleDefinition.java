@@ -1,4 +1,4 @@
-package io.github.orionlibs.ecommerce.lifecycle.model;
+package io.github.orionlibs.ecommerce.core.lifecycle;
 
 import java.util.List;
 
