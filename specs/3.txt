@@ -1,316 +1,270 @@
-* Store and serve lifecycle definitions and versions.
-* Manage lifecycle instances (an instance = a specific domain entity under a lifecycle).
-* Validate and execute transitions (automated and manual).
-* Run approval flows (single/multi-step approvers, SLA, auto-reject/auto-approve policies).
-* Schedule future transitions and expirations.
-* Publish lifecycle events that other services consume.
-* Keep full audit trails and support snapshots/rollback.
-* Expose admin UI for lifecycle authoring and monitoring.
+--configurability
+--publish/consume events
+--metrics for observability
+--timed metrics for observability
+--uns-cli shell app
+--update README.md
 
+
+Create project "tags-service":
+1--get number of tags
+2--get number of realtime tag providers
+3--get number of historical tag providers
+4--get realtime tag providers
+5--get historical tag providers
+The tag service loads the tag cache in its memory. It subscribes to MQTT and updates its cache and the realtime tag database. It uses a websocket to notify of tag changes
+
+
+The tag historian project subscribes to MQTT and stores tags to the historian. This project has its own default historian. The database service knows which other databases are supposed to be historians. So when this service starts, it calls the database service to retrieve all the other historians and connect to the ones that are marked as active. It also subscribes to the event manager, so when it gets notified that a new historian was just registered (as active) or if a historian was deleted, or marked as active or inactive or if the credentials changed or if the connection URL changed, it will act accordingly. When this project gets a tag from MQTT, it stores to them the tag it just received from MQTT (the databases it is currently connected to)
+
+
+
+Create project "script-service":
+1--get number of scripts configured
+2--get scripts
+The script service will allow users to use Jython or groovy or kotlin or java to write scripts. Find a way to expose certain functions
+
+
+Create project "logger-service":
+1--get logs
+
+
+Create project "diagnostics-service":
+The diagnostics project checks all database connections, the status of all store-and-forward engines, the tag cache
+
+
+Use spring AI to connect to LLMs using configurable API keys to ask it to do various things. Create some built-in commands. It should be able to access the historian
+
+
+Download status report as txt that has all status info or selected info
+
+
+Create project "metrics-service"
+The metrics service can track various things like:
+* **Throughput & Volume**
+  * Messages published/sec per topic
+  * Messages consumed/sec per subscriber
+  * Total messages in flight
+* **Latency & Timing**
+  * Publish-to-consume end-to-end latency (p95, p99)
+  * Broker broker-internal routing latency
+* **Backlog & Storage**
+  * Queue depth / backlog per topic
+  * Retention storage usage
+* **Error & Failure Rates**
+  * Publish failures / retries
+  * Delivery errors (timeouts, malformed)
+  * Consumer re-balance events
 ---
-
-# Key features
-
-1. **Lifecycle definition authoring** (DSL): states, transitions, guards, actions (sync/async), approval steps, notifications, retry policy, compensation actions.
-2. **Versioning of lifecycle definitions** and migration tools for instances.
-3. **Lifecycle instances**: attach to any domain object (by type + id), track current state, metadata, properties.
-4. **Graphical state visualizer** and authoring UI with validation and simulation.
-5. **Approval workflows**: roles-based approvers, parallel/serial approvals, deadline handling, escalations.
-6. **Scheduling**: time-based transitions (e.g., publish at), TTL state transitions (e.g., auto-deprecate after 1 year).
-7. **Eventing & Outbox**: publish lifecycle.events.{entityType} via Kafka; transactional outbox for guaranteed delivery.
-8. **Webhooks & callbacks** for systems that need push notifications.
-9. **Adapters & SDKs**: lightweight client libraries for Java/JS, and generic webhook/gRPC adapters.
-10. **Audit & history**: complete immutable timeline with who/what/when/why.
-11. **Simulation & dry-run**: test transitions without changing live instances.
-12. **Access control**: RBAC and approval scoping per tenant.
-13. **Multi-tenant support**: tenant-specific definitions and overrides.
-14. **Data retention & archiving** rules and GDPR-friendly deletion/erase.
-15. **Admin operations**: force transition, rollback, snapshot restore, bulk operations.
-16. **Observability**: metrics, traces, dashboards, alerting, and audit exports.
-
+## 3. Tag & Data-Point Metrics
+* **Tag Volume**
+  * Total number of tags (static vs. dynamic)
+  * Tags added/removed per hour
+* **Sampling & Update Rates**
+  * Scan rate distributions (fast, slow tags)
+  * Actual vs. configured scan rate
+* **Data Quality**
+  * % of good vs. bad quality readings
+  * Timestamp skew / staleness
+  * Out-of-range value counts
+* **Throughput**
+  * Data points ingested/sec into historian
+  * Compressed vs. uncompressed storage rates
 ---
-
-# Domain model (conceptual)
-
-* **LifecycleDefinition** (id, key, name, version, json/yaml, createdBy, createdAt, tenantId)
-* **LifecycleTransition** (id, definitionId, fromState, toState, name, guardExpression, actions\[])
-* **LifecycleInstance** (id, entityType, entityId, definitionId, definitionVersion, currentState, metadata jsonb, createdAt, updatedAt, tenantId)
-* **LifecycleEvent** (id, instanceId, eventType, payload jsonb, status, createdAt)
-* **Approval** (id, instanceId, transitionId, approverId, status, comments, createdAt, resolvedAt)
-* **Schedule** (id, instanceId, transitionId, executeAt, cronExpression?, status)
-* **AuditRecord** (id, instanceId, actor, action, details jsonb, timestamp)
-
-> Data fields: use UUIDs for IDs, JSONB for flexible metadata, timestamps with timezone.
-
+## 4. Historian & Time-Series Storage
+* **Write Performance**
+  * Inserts/sec
+  * Write latency (avg, p95)
+* **Read Performance**
+  * Query throughput (queries/sec)
+  * Query latency (avg, p95, p99)
+* **Storage Utilization**
+  * Total DB size
+  * Retained data window vs. policy
+  * Archival job durations & success
 ---
-
-# Example lifecycle for product publishing (illustrative)
-
-States: `Draft` -> `Review` -> `Approved` -> `Published` -> `Deprecated` -> `Deleted`
-
-Transitions examples:
-
-* `submit_for_review` (Draft -> Review) — triggers notification.
-* `approve` (Review -> Approved) — requires 1-2 approvers (parallel/serial configurable).
-* `publish` (Approved -> Published) — scheduled publish support (executeAt).
-* `deprecate` (Published -> Deprecated) — TTL based or manual.
-* `delete` (Deprecated -> Deleted) — hard-delete after retention.
-
-Guards/actions: validate metadata completeness, call product-indexer service to index on `Published`, publish Kafka event `lifecycle.event.product.published`.
-
+## 5. Application & Scripting
+* **Execution Metrics**
+  * Script/function invocation counts
+  * Execution duration (avg, max, p95, p99)
+  * Error/exception rates
+* **Session & Connection**
+  * Active user sessions
+  * API connection counts
+  * Session duration
+* **Cache Performance**
+  * Cache hit/miss ratios
+  * Eviction counts
 ---
-
-# APIs (REST first, add gRPC later)
-
-All endpoints require `Authorization: Bearer <jwt>` and `X-Tenant-Id` header for multi-tenant.
-
-### Lifecycle definitions
-
-* `GET /api/v1/lifecycles` — list definitions (filters: tenant, entityType)
-* `POST /api/v1/lifecycles` — create lifecycle definition (YAML/JSON body)
-* `GET /api/v1/lifecycles/{key}/versions` — list versions
-* `GET /api/v1/lifecycles/{key}/versions/{version}` — get definition
-* `PUT /api/v1/lifecycles/{key}/versions/{version}` — update (create new version)
-* `POST /api/v1/lifecycles/{key}/simulate` — simulate transitions given instance state
-
-### Lifecycle instances
-
-* `POST /api/v1/instances` — create instance `{ entityType, entityId, lifecycleKey, lifecycleVersion?, metadata? }`
-* `GET /api/v1/instances/{id}` — get instance and current state
-* `POST /api/v1/instances/{id}/transitions` — request a transition `{ transitionName, actor, reason, payload, idempotencyKey? }`
-* `GET /api/v1/instances/{id}/history` — audit timeline
-* `POST /api/v1/instances/{id}/schedule` — schedule transition `{ transitionName, executeAt/crontab }`
-* `POST /api/v1/instances/{id}/force` — admin forced transition (audit recorded)
-
-### Approvals
-
-* `GET /api/v1/approvals?assignee=...` — list pending approvals
-* `POST /api/v1/approvals/{id}/resolve` — `{ decision: APPROVE|REJECT, comments }`
-
-### Admin
-
-* `POST /api/v1/definitions/{key}/migrate` — bulk migrate instances to new version
-* `POST /api/v1/instances/bulk` — bulk create or bulk transition
-* `GET /api/v1/metrics/health` — LMS health and metrics summary
-
+## 6. Alarm & Notification
+* **Alarm Rates**
+  * Total alarms generated/sec
+  * Active vs. cleared alarms
+* **Severity Distribution**
+  * % of critical, major, minor
+* **Notification Delivery**
+  * Notifications sent/sec (email, SMS, webhook)
+  * Delivery success/failure rates
+  * Avg notification latency
+* **Acknowledgment & Escalation**
+  * Time to acknowledge (avg, max)
+  * Escalation count
 ---
-
-# Events & messaging
-
-* Publish event types: `lifecycle.instance.created`, `lifecycle.transition.requested`, `lifecycle.transition.executed`, `lifecycle.approval.requested`, `lifecycle.approval.resolved`, `lifecycle.instance.archived`.
-* Use Kafka topics: `lifecycle.events` with a `type` and `entityType` header for routing. Schema: Avro/Protobuf for strong typing.
-* Implement transactional outbox pattern: write event to `outbox` table in same DB tx as instance update; separate outbox worker publishes to Kafka.
-* Provide webhook subscription service: `POST /api/v1/subscriptions` to register domain services to receive HTTP callbacks for particular event types.
-
+## 7. Integration & Connectivity
+* **Endpoint Health**
+  * OPC UA/DA uptime & reconnects
+  * MQTT/TCP connection counts & drops
+  * HTTP API error rates (4xx, 5xx)
+* **Throughput**
+  * Data transferred per connector
+  * Polling vs. event-driven ratio
+* **Protocol Metrics**
+  * OPC UA SecureChannel opens/closes
+  * MQTT keep-alive ping failures
 ---
-
-# Integration patterns
-
-* **Push**: domain services subscribe to `lifecycle.events` or register webhooks.
-* **Pull**: domain services query `GET /api/v1/instances?entityType=Product&entityId=...` to reconcile state.
-* **Callback adapters**: provide small adapters or libraries to handle idempotency, retries and verify events.
-* **Saga coordination**: LMS emits events; downstream services may run compensating actions if downstream failure occurs (LMS supports compensation actions as part of transition definition).
-
+## 8. Security & Audit
+* **Authentication**
+  * Login success/failure rate
+  * Failed login streaks (per IP/user)
+* **Authorization**
+  * Access denials (role-based checks)
+  * Privilege escalations detected
+* **Network Security**
+  * TLS handshake failures
+  * Suspicious IP blocklists hits
+* **Audit Trails**
+  * Configuration change events
+  * User actions (create/delete tag, modify script)
 ---
-
-# State machine engine — design options
-
-**Option A — Declarative engine (recommended)**
-
-* Store definitions as JSON/YAML. Interpret them at runtime with an in-memory engine that enforces guards/actions.
-* Persist instance state and transition history.
-* Use a small rule engine for guard expressions (e.g., MVEL, SpEL) but sandboxed — prefer compiled expressions with limited capabilities.
-
-**Option B — External workflow engine**
-
-* Use Temporal/Zeebe for complex long-running workflows and retries. The LMS acts as a thin control plane and stores definitions in Temporal. Good when heavy orchestration required.
-
-Note: start with Option A for simplicity, design abstraction so later you can plug in Temporal for complex orchestrations.
-
+## 9. Reliability & Availability
+* **Service Uptime**
+  * Percent availability (SLI/SLO)
+  * Mean Time Between Failures (MTBF)
+  * Mean Time To Recovery (MTTR)
+* **Redundancy**
+  * Failover events
+  * Replica synchronization lag
+* **Backup & Restore**
+  * Backup job success rates & duration
+  * Restore drill durations
 ---
+## 10. Metrics Service-Specific
+* **Ingestion**
+  * Metric points ingested/sec
+  * Ingestion error rate
+* **Storage & Indexing**
+  * DB write/read latency
+  * Index size & growth rate
+* **Query & Visualization**
+  * Dashboard query latency
+  * Concurrent dashboard sessions
+* **Retention & Downsampling**
+  * Data retention policy hits
+  * Compaction job durations
+* **Alerting on Metrics**
+  * Rule eval/sec
+  * Alerts fired vs. suppressed
+* **Internal Health**
+  * Service CPU/memory usage
+  * Request timeouts
+  * Garbage collection pause times
 
-# Persistence & schema (Postgres recommended)
 
-Tables (summary):
+Create project "analytics-service"
 
-* `lifecycle_definitions` (uuid, key, version int, name, payload jsonb, tenant\_id, created\_by, created\_at)
-* `lifecycle_instances` (uuid, entity\_type, entity\_id, definition\_key, definition\_version, current\_state, metadata jsonb, created\_at, updated\_at)
-* `lifecycle_events_outbox` (uuid, topic, payload jsonb, status, retry\_count, created\_at, last\_attempt\_at)
-* `lifecycle_approvals` (uuid, instance\_id, transition\_name, approver, status, comments, created\_at, resolved\_at)
-* `lifecycle_history` (uuid, instance\_id, actor, action, details jsonb, timestamp)
-* `lifecycle_schedules` (uuid, instance\_id, transition\_name, execute\_at, cron\_expr, status)
 
-Indexes: primary by uuid, unique(entity\_type, entity\_id) if one instance per entity, index on (tenant\_id), index on scheduled time for job polling.
+Create project "project-service"
 
-Retention: archive history older than X days to a cold store (S3) if required.
 
----
+Create project "email-service"
 
-# Concurrency, idempotency & resilience
 
-* Require `idempotency-key` header for transition requests and scheduled jobs to ensure exactly-once semantics.
-* Use optimistic locking on `lifecycle_instances` (version column) to avoid lost updates.
-* Durable scheduling: store schedules in DB and have worker pool claim jobs (SELECT ... FOR UPDATE SKIP LOCKED).
-* Dead-letter queue for failed events with admin UI to reprocess.
-* Retries: exponential backoff for external actions, configurable per-action in definition.
+Create math library
 
----
 
-# Security and access control
+Create data sources service
+--can connect to various databases or other types of data providers
+--data source explorer shows the data model (DDL) and query tool
 
-* Authentication: OAuth2 / OpenID Connect (JWT tokens).
-* Authorization: RBAC with roles: `LIFECYCLE_ADMIN`, `LIFECYCLE_DEVELOPER`, `APPROVER`, `AUDITOR`.
-* Fine-grained permissions on lifecycle definitions and instances (tenant-scoped).
-* Approval policies: require approver to present credentials; actions recorded with actor identity.
-* Secrets: avoid storing credentials in lifecycle definition—use references to secrets manager.
 
----
+Create historian simulator service used to create demo models and tags for testing
 
-# UI / UX
 
-* **Authoring UI**: visual graph editor, JSON/YAML toggle, validation errors, version publish button.
-* **Instance dashboard**: list instances by entityType, filter by state, tenant, date; detail panel with state timeline and action buttons.
-* **Approval inbox**: approvers see pending approvals, SLA timers, accept/reject with comments.
-* **Admin tools**: migration runner, outbox monitor, dead-letter reprocessor, audit export.
+Create model service project representing a hierarchical model of entities.
+--We can create folders, thing, events, metrics, KPIs, scripts.
+--We can add, rename, delete, move up, move down, refresh entities.
+--entities are associated with tags
+--We can create, rename, delete, use model or entity templates. We can use templates to create new entities, or deassociate entities from templates, or create a template using an existing entity as the prototype
 
----
 
-# Observability & operations
+Create project service project used to create HMI projects
+--a project has name, description etc. It also has windows that include components i.em tabs, gauges, charts, scripts, tags, reports, labels, buttons, textboxes, textareas, static images, images like tanks that show the percentage of its capacity used, tables
+--the values of components are binded to tags, MySQL queries, static values, built-in or custom functions, expressions using my DSL to calculate things, to the value of another component's property
+--the value binding can be event-triggered or by polling
+--we can group and ungroup components
+--we can create and use component templates
+--we can use component group templates
+--components properties: name, is enabled, is visible
+--we can export the components of a window or an entire project
+--we can import the components of a window or an entire project
+--show a tree of the structure of a project
+--create project template and new projects derived by it inherit its windows, components and properties
 
-* Tracing: OpenTelemetry for distributed traces (tag events with instanceId).
-* Metrics: Prometheus metrics for counts of transitions, failed transitions, approvals pending, schedule backlog.
-* Logs: structured logging (JSON), correlate with requestId and instanceId.
-* Dashboards: Grafana dashboards for key metrics and SLA breaches.
-* Alerts: alert on failed publish rate, approval SLA misses, outbox publish lag.
 
----
+Create tag historian service project
+--create tag groups
+--create UDT (user-defined tags)
+--create new tag, set the data source from which we retrieve its values or the MQTT topic, set the tag group it belongs to, set data type, set the deadband (if the new value minus the last value is >= deadband then store the new value in the historian and the realtime tag database
+--enable or disable maintaining historian values
 
-# Testing strategy
 
-* Unit tests for engine, guard evaluation and action dispatch.
-* Integration tests with embedded Postgres + test Kafka (or Testcontainers) for outbox.
-* Contract tests (PACT) for event consumers/producers.
-* End-to-end tests for full lifecycle including approvals and scheduled transitions.
-* Property-based tests for state machine invariants.
+Use the abstract event publisher for all API endpoints
 
----
 
-# Deployment & infra
+Make things configurable. Create pojo classes that hold config and the config is loaded during startup using @Value("${prop}") and add environment props inside the application.YAML file and then use @ConditionalProperties inside the config pojo
 
-* Package as Spring Boot 3 native-friendly JAR; consider Graal native-image later.
-* Deploy on Kubernetes with Helm charts. Use HPA (Horizontal Pod Autoscaler) and adequate resource requests/limits.
-* DB: managed Postgres (RDS/Azure/GCP Cloud SQL) with read replicas if needed.
-* Messaging: Kafka cluster (or managed Kafka) with topics partitioned by tenant or entity type for scale.
-* CI/CD: build pipelines that validate lifecycle definitions (lint), run integration tests, and deploy via GitOps.
 
----
+Use virtual threads where possible
 
-# Example lifecycle definition (YAML)
 
-```yaml
-key: product.publishing
-name: Product Publishing
-version: 1
-states:
-  - Draft
-  - Review
-  - Approved
-  - Published
-  - Deprecated
-  - Deleted
-transitions:
-  - name: submit_for_review
-    from: Draft
-    to: Review
-    actions:
-      - type: notify
-        target: topic:notifications
-  - name: approve
-    from: Review
-    to: Approved
-    approvals:
-      type: parallel
-      required: 2
-    guards:
-      - expression: "metadata.price > 0"
-  - name: publish
-    from: Approved
-    to: Published
-    schedule: true
-    actions:
-      - type: call
-        target: service:product-indexer
-        retries: 3
-  - name: deprecate
-    from: Published
-    to: Deprecated
-    scheduleAfter: 365d
-```
+Device control service allows us to send commands to devices via some protocol
 
----
 
-# Example REST call — request transition
+services can use kafka to publish events. Implement MQTT publishing, as well using HiveMQ
 
-```
-POST /api/v1/instances/123e4567-89ab-cdef-0123-456789abcdef/transitions
-Authorization: Bearer <jwt>
-Idempotency-Key: abc-123
 
-{
-  "transitionName":"publish",
-  "actor":"user:alice",
-  "payload": { "executeAt": "2025-09-01T10:00:00Z" },
-  "reason":"Marketing campaign launch"
-}
-```
+Create sequential function chart service project
+--create an SFC which is a sequence of scripts to be executed
 
----
 
-# Sample Java DTO (Spring record style)
+Create feedback service for people to submit feedback
 
-```java
-package com.yourorg.lms.dto;
 
-import java.util.UUID;
-import java.time.Instant;
+Create support service for users to create support requests and support users to create and manage support tickets
 
-public record TransitionRequest(
-    UUID instanceId,
-    String transitionName,
-    String actor,
-    String idempotencyKey,
-    java.util.Map<String,Object> payload,
-    String reason
-) {}
-```
 
----
+Create a command line utility project allowing users to run certain tasks by calling (internally) the APIs. Find how to generate a client SDK in java from all APIs. The utility will use this SDK
 
-# Roadmap / Implementation phases
 
-1. **MVP (4-8 weeks)**
+Create project "databases-service" with API:
+5--get currently running queries per database
+6--get long-running queries per database
+7--get queries per second per database
+8--get queries per second from all databases
 
-   * Core lifecycle definitions CRUD, instances CRUD, simple in-memory engine with persistent instance state
-   * REST APIs, outbox with Kafka producer, simple authoring UI (JSON editor)
-   * Basic RBAC and auditing
 
-2. **Phase 2 (8-12 weeks)**
+Create project "alarms-service":
+The alarm service subscribes to MQTT and checks if the tag updated should raise an alarm. The alarm subscribes to the event manager so that if an event that just occurred has an attached alarm, it will raise an alarm
 
-   * Approval workflows, scheduling engine, graphical authoring UI
-   * Webhooks, subscription management, transactional outbox
-   * Observability (OTel + Prometheus)
 
-3. **Phase 3 (ongoing)**
+https://openautomationsoftware.com/knowledge-base/options-reference/
 
-   * Temporal/Zeebe integration for heavy orchestrations
-   * Multi-tenant optimizations, performance tuning
-   * SDKs, richer UI, policy engine, full lifecycle migration tools
 
----
+https://openautomationsoftware.com/knowledge-base/parameter-properties/
 
-# Operational considerations & gotchas
 
-* Carefully design guard expression execution to avoid unsafe code execution (use a sandboxed expression evaluator).
-* Balance feature richness with performance: large numbers of scheduled transitions require a job-scheduler optimized with partitioning.
-* Ensure event schemas are versioned and backwards compatible.
-* Provide admin tools for replay/reconciliation when system drift occurs.
+https://www.gevernova.com/software/documentation/proficy-plant-applications/version2023/index_api_endpoint.html
+
+
+ignition JavaDocs
+https://files.inductiveautomation.com/sdk/javadoc/earlyaccess/ignition83/8.3.0-SNAPSHOT/index.html
