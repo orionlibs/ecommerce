@@ -1,11 +1,3 @@
---configurability
---publish/consume events
---metrics for observability
---timed metrics for observability
---uns-cli shell app
---update README.md
-
-
 Create project "tags-service":
 1--get number of tags
 2--get number of realtime tag providers

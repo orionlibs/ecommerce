@@ -1,0 +1,67 @@
+--configurability
+--publish/consume events
+--metrics for observability
+--timed metrics for observability
+--uns-cli shell app
+--update README.md
+
+
+
+Content management (CMS)
+
+
+Checkout service
+
+
+Store service
+
+
+Catalog service
+
+
+Product category service
+
+
+Product service
+
+
+Stock service
+
+
+Basket service
+
+
+Order service
+
+
+Media service (that handles pictures, videos, documents)
+
+
+Payment service
+
+
+Product carousel
+
+
+Export service
+
+
+Import service
+
+
+Coupon service
+
+
+Promotion service
+
+
+Order history
+
+
+Comment service
+
+
+Customer support
+
+
+Warehouse service
