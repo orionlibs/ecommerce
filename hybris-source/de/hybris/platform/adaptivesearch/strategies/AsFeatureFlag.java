@@ -1,6 +1,0 @@
-package de.hybris.platform.adaptivesearch.strategies;
-
-public enum AsFeatureFlag
-{
-    FACET_VALUES_SORT_PROVIDER, FACET_VALUES_DISPLAY_NAME_PROVIDER, FACET_TOP_VALUES_PROVIDER, FACET_TOP_VALUES, FACET_SORT, FACET_VALUE_RANGES;
-}

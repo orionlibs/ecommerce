@@ -1,6 +1,0 @@
-package de.hybris.platform.payment.dto;
-
-public enum CvnStatus
-{
-    NO_RESULT, UNRECOGNIZED_RESULT, NOT_SUPPORTED, NOT_PROVIDED, NOT_PROCESSED, NOT_MATCHED, MATCHED, NOT_VALIDATED, REJECTED;
-}

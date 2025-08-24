@@ -1,5 +1,0 @@
-package de.hybris.platform.promotionengineservices.jalo;
-
-public class RuleBasedOrderChangeDeliveryModeAction extends GeneratedRuleBasedOrderChangeDeliveryModeAction
-{
-}

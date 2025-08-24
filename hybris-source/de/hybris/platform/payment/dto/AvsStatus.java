@@ -1,6 +1,0 @@
-package de.hybris.platform.payment.dto;
-
-public enum AvsStatus
-{
-    PARTIAL_MATCH, MATCHED, NOT_MATCHED, NOT_SUPPORTED, INVALID, NO_RESULT, UNRECOGNIZED_RESULT, SYSTEM_UNAVAILABLE;
-}
