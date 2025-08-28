@@ -9,7 +9,6 @@
 https://shopify.dev/docs/api
 https://developer.bigcommerce.com/docs/api
 https://developer-docs.amazon.com/sp-api/reference/welcome-to-api-references
-https://developer-docs.amazon.com/sp-api/docs/a-plus-content-api-use-case-guide
 https://help.salesforce.com/s/articleView?id=cc.b2c_catalogs.htm&type=5
 
 

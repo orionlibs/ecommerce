@@ -41,7 +41,7 @@ class SaveStateTransitionWithProvidedNextStateAPIControllerTest
     void saveStateTransitionWithAutomaticDetectionOfNextState()
     {
         LifecycleDefinitionModel definition = new LifecycleDefinitionModel();
-        definition.setKey("key1");
+        definition.setDefinitionKey("key1");
         definition.setName("name1");
         definition.setPayload("""
                         key: "key1"

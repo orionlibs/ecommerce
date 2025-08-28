@@ -18,7 +18,7 @@ import org.hibernate.annotations.UpdateTimestamp;
 @Table(name = "idempotency_records",
                 uniqueConstraints = @UniqueConstraint(
                                 name = "uk_idempotency_key_endpoint",
-                                columnNames = {"idempotency_key", "endpoint"}
+                                columnNames = {"idempotencyKey", "endpoint"}
                 ))
 @Getter
 @Setter
@@ -27,25 +27,25 @@ public class IdempotencyRecordModel implements OrionModel
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    @Column(name = "idempotency_key", nullable = false)
+    @Column(nullable = false)
     private String idempotencyKey;
-    @Column(name = "endpoint", nullable = false)
+    @Column(nullable = false)
     private String endpoint;
-    @Column(name = "request_hash")
+    @Column
     private String requestHash; // Hash of request body to ensure same request
-    @Column(name = "response_status")
+    @Column
     private Integer responseStatus;
-    @Column(name = "response_body", columnDefinition = "TEXT")
+    @Column(columnDefinition = "TEXT")
     private String responseBody;
-    @Column(name = "response_headers", columnDefinition = "TEXT")
+    @Column(columnDefinition = "TEXT")
     private String responseHeaders; // JSON string of headers
-    @Column(name = "expires_at")
+    @Column
     private LocalDateTime expiresAt;
     @CreationTimestamp
-    @Column(name = "created_at", updatable = false, nullable = false)
+    @Column(updatable = false, nullable = false)
     private LocalDateTime createdAt;
     @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
+    @Column(nullable = false)
     private LocalDateTime updatedAt;
 
 

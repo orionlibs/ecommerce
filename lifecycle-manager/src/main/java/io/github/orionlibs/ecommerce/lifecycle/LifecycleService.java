@@ -39,7 +39,7 @@ public class LifecycleService
     {
         LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(instanceId)
                         .orElseThrow(() -> new RuntimeException("Instance not found"));
-        LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
+        LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByDefinitionKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
                         .orElseThrow(() -> new RuntimeException("Definition not found"));
         LifecycleDefinition definition = lifecycleDefinitionParser.parseDefinition(definitionEntity.getPayload());
         Optional<StateTransition> transition = stateTransitionFinder.findTransition(definition, instance.getCurrentState());
@@ -61,7 +61,7 @@ public class LifecycleService
     {
         LifecycleInstanceModel instance = lifecycleInstancesDAO.findById(instanceId)
                         .orElseThrow(() -> new RuntimeException("Instance not found"));
-        LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
+        LifecycleDefinitionModel definitionEntity = lifecycleDefinitionsDAO.findByDefinitionKeyAndVersion(instance.getDefinitionKey(), instance.getDefinitionVersion())
                         .orElseThrow(() -> new RuntimeException("Definition not found"));
         LifecycleDefinition definition = lifecycleDefinitionParser.parseDefinition(definitionEntity.getPayload());
         Optional<StateTransition> transition = stateTransitionFinder.findTransition(definition, instance.getCurrentState(), stateToTransitionTo);

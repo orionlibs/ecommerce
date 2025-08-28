@@ -28,7 +28,7 @@ public class LifecycleDefinitionsDAOTest
     void findById()
     {
         LifecycleDefinitionModel model1 = new LifecycleDefinitionModel();
-        model1.setKey("key1");
+        model1.setDefinitionKey("key1");
         model1.setName("name1");
         model1.setPayload("""
                         key: "key1"
@@ -55,13 +55,13 @@ public class LifecycleDefinitionsDAOTest
         model1.setVersion(1);
         model1 = dao.saveAndFlush(model1);
         LifecycleDefinitionModel model2 = new LifecycleDefinitionModel();
-        model2.setKey("key2");
+        model2.setDefinitionKey("key2");
         model2.setName("name2");
         model2.setPayload("");
         model2.setVersion(2);
         model2 = dao.saveAndFlush(model2);
         Optional<LifecycleDefinitionModel> modelWrap = dao.findById(model1.getId());
-        assertThat(modelWrap.get().getKey()).isEqualTo("key1");
+        assertThat(modelWrap.get().getDefinitionKey()).isEqualTo("key1");
     }
 
 
@@ -69,7 +69,7 @@ public class LifecycleDefinitionsDAOTest
     void findAll()
     {
         LifecycleDefinitionModel model1 = new LifecycleDefinitionModel();
-        model1.setKey("key1");
+        model1.setDefinitionKey("key1");
         model1.setName("name1");
         model1.setPayload("""
                         key: "key1"
@@ -96,15 +96,15 @@ public class LifecycleDefinitionsDAOTest
         model1.setVersion(1);
         model1 = dao.saveAndFlush(model1);
         LifecycleDefinitionModel model2 = new LifecycleDefinitionModel();
-        model2.setKey("key2");
+        model2.setDefinitionKey("key2");
         model2.setName("name2");
         model2.setPayload("");
         model2.setVersion(2);
         model2 = dao.saveAndFlush(model2);
         List<LifecycleDefinitionModel> models = dao.findAll();
         assertThat(models.size()).isEqualTo(2);
-        assertThat(models.get(0).getKey()).isEqualTo("key1");
-        assertThat(models.get(1).getKey()).isEqualTo("key2");
+        assertThat(models.get(0).getDefinitionKey()).isEqualTo("key1");
+        assertThat(models.get(1).getDefinitionKey()).isEqualTo("key2");
     }
 
 
@@ -112,7 +112,7 @@ public class LifecycleDefinitionsDAOTest
     void findByKeyAndVersion()
     {
         LifecycleDefinitionModel model1 = new LifecycleDefinitionModel();
-        model1.setKey("key1");
+        model1.setDefinitionKey("key1");
         model1.setName("name1");
         model1.setPayload("""
                         key: "key1"
@@ -139,14 +139,14 @@ public class LifecycleDefinitionsDAOTest
         model1.setVersion(1);
         model1 = dao.saveAndFlush(model1);
         LifecycleDefinitionModel model2 = new LifecycleDefinitionModel();
-        model2.setKey("key2");
+        model2.setDefinitionKey("key2");
         model2.setName("name2");
         model2.setPayload("");
         model2.setVersion(2);
         model2 = dao.saveAndFlush(model2);
-        Optional<LifecycleDefinitionModel> modelWrap = dao.findByKeyAndVersion("key2", 2);
-        assertThat(modelWrap.get().getKey()).isEqualTo("key2");
-        modelWrap = dao.findByKeyAndVersion("key2", 1);
+        Optional<LifecycleDefinitionModel> modelWrap = dao.findByDefinitionKeyAndVersion("key2", 2);
+        assertThat(modelWrap.get().getDefinitionKey()).isEqualTo("key2");
+        modelWrap = dao.findByDefinitionKeyAndVersion("key2", 1);
         assertThat(modelWrap.isEmpty()).isTrue();
     }
 }

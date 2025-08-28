@@ -19,7 +19,7 @@ class LifecycleInitialiser
     {
         LifecycleDefinition definition = lifecycleDefinitionParser.parseDefinition(definitionEntity.getPayload());
         LifecycleInstanceModel instance = new LifecycleInstanceModel();
-        instance.setDefinitionKey(definitionEntity.getKey());
+        instance.setDefinitionKey(definitionEntity.getDefinitionKey());
         instance.setDefinitionVersion(definitionEntity.getVersion());
         instance.setCurrentState(definition.getFirstState());
         return lifecycleInstancesDAO.save(instance);

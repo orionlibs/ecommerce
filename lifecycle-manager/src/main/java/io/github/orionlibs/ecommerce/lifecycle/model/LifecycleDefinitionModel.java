@@ -19,9 +19,9 @@ import org.hibernate.annotations.UpdateTimestamp;
 
 @Entity
 @Table(name = "lifecycle_definitions", schema = "uns", indexes = {
-                @Index(name = "idx_uns_lifecycle_definitions", columnList = "definition_key,version")
+                @Index(name = "idx_uns_lifecycle_definitions", columnList = "definitionKey,version")
 },
-                uniqueConstraints = @UniqueConstraint(columnNames = {"definition_key", "version"}))
+                uniqueConstraints = @UniqueConstraint(columnNames = {"definitionKey", "version"}))
 @Getter
 @Setter
 public class LifecycleDefinitionModel implements OrionModel
@@ -30,8 +30,8 @@ public class LifecycleDefinitionModel implements OrionModel
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(updatable = false, nullable = false)
     private UUID id;
-    @Column(name = "definition_key", nullable = false)
-    private String key;
+    @Column(nullable = false)
+    private String definitionKey;
     @Column(nullable = false)
     private String name;
     @Lob
@@ -40,9 +40,9 @@ public class LifecycleDefinitionModel implements OrionModel
     @Column(nullable = false)
     private int version;
     @CreationTimestamp
-    @Column(name = "created_at", updatable = false, nullable = false)
+    @Column(updatable = false, nullable = false)
     private LocalDateTime createdAt;
     @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
+    @Column(nullable = false)
     private LocalDateTime updatedAt;
 }

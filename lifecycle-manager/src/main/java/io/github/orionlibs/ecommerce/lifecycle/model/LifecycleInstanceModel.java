@@ -34,9 +34,9 @@ public class LifecycleInstanceModel implements OrionModel
     @Column(nullable = false)
     private String currentState;
     @CreationTimestamp
-    @Column(name = "created_at", updatable = false, nullable = false)
+    @Column(updatable = false, nullable = false)
     private LocalDateTime createdAt;
     @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
+    @Column(nullable = false)
     private LocalDateTime updatedAt;
 }

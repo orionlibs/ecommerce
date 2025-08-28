@@ -13,5 +13,5 @@ public interface LifecycleDefinitionsDAO extends JpaRepository<LifecycleDefiniti
     Integer testConnection();
 
 
-    Optional<LifecycleDefinitionModel> findByKeyAndVersion(String key, int version);
+    Optional<LifecycleDefinitionModel> findByDefinitionKeyAndVersion(String key, int version);
 }
