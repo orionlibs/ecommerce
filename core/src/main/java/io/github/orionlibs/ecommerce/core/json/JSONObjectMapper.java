@@ -20,7 +20,8 @@ public class JSONObjectMapper
                                         SerializationFeature.FAIL_ON_EMPTY_BEANS,
                                         SerializationFeature.FAIL_ON_SELF_REFERENCES)
                         .build();
-        this.mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        //this.mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        this.mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
     }
 
 

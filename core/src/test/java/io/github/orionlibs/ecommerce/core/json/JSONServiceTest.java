@@ -2,7 +2,6 @@ package io.github.orionlibs.ecommerce.core.json;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,7 +34,7 @@ public class JSONServiceTest
                         {
                             "number": 64,
                             "message": "some message",
-                            "some_fields": [
+                            "someFields": [
                                 "one",
                                 "two"
                             ]
@@ -50,7 +49,7 @@ public class JSONServiceTest
     private record Pojo(
                     int number,
                     String message,
-                    @JsonProperty("some_fields") List<String> someFields
+                    List<String> someFields
     )
     {
     }

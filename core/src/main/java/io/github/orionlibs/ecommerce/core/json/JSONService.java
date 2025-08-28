@@ -18,7 +18,8 @@ public class JSONService
                                         SerializationFeature.FAIL_ON_EMPTY_BEANS,
                                         SerializationFeature.FAIL_ON_SELF_REFERENCES)
                         .build();
-        mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        //mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        mapper = mapper.setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
     }
 
     public static String convertObjectToJSON(Object objectToConvert)
