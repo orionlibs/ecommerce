@@ -1,15 +1,3 @@
-Nice — let’s design a **comprehensive REST API surface for the *Store Service*** (the thing that owns storefronts/merchant accounts, channels, domains, branding, pages, navigation, themes, locales and other store-level configuration). I’ll include only endpoints that belong to the store domain (no carts, stock, orders, payments, product CRUD, user-auth internals, etc.). I’ll also call out important query params, typical request/response pieces, auth scopes, and useful features (publish/versioning/webhooks).
-
----
-
-# Store Service — REST API endpoints
-
-> Base path assumed: `/api/v1` (replaceable). All endpoints require authentication; mention of scopes below (e.g. `store:read`, `store:write`, `store:admin`) — your Auth/User service issues these and staff are referenced by user IDs.
-
----
-
-## Stores (top-level merchant/storefront object)
-
 Manage the store entity itself (multi-tenant). A **store** is the container for everything: channels, domains, branding, settings, pages, menus, themes.
 
 * `POST /stores`

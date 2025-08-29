@@ -3,7 +3,8 @@ This monorepo hosts a number of Spring Boot Dockerisable microservices and commo
 
 
 # Features
-1. reusable lifecycle management service of entities using state transitions
+1. reusable classes, methods and utilities
+2. reusable lifecycle management service of entities using state transitions
 
 
 # Build and Run

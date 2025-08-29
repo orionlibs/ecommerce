@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ../
+      dockerfile: store/Dockerfile
+      args:
+        serviceName: store
+    image: store:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      STORE_DATABASE_URL: "${STORE_DATABASE_URL}"
+      STORE_DATABASE_USERNAME: "${STORE_DATABASE_USERNAME}"
+      STORE_DATABASE_PASSWORD: "${STORE_DATABASE_PASSWORD}"

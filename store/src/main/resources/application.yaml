@@ -1,0 +1,66 @@
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    include-binding-errors: always
+    include-message: always
+    include-stacktrace: never
+
+springdoc:
+  packagesToScan: io.github.orionlibs.ecommerce.store.api
+  writer-with-order-by-keys: true
+  api-docs:
+    path: /api/docs
+  swagger-ui:
+    path: /api/swagger-ui
+
+spring:
+  application:
+    name: Store Service
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+  jackson:
+    property-naming-strategy: LOWER_CAMEL_CASE
+    #property-naming-strategy: SNAKE_CASE
+
+version: 0.0.1
+environment: ${ENVIRONMENT_NAME:production}
+
+app:
+  default-config:
+    default.printing.timezone: GB
+
+# Production profile (default)
+---
+spring:
+  config:
+    activate:
+      on-profile: "!test"
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${STORE_DATABASE_URL}
+    username: ${STORE_DATABASE_USERNAME}
+    password: ${STORE_DATABASE_PASSWORD}
+    hikari:
+      minimumIdle: 2
+      maximumPoolSize: 10
+      idleTimeout: 10000
+      maxLifetime: 1800000
+      connectionTimeout: 30000
+  jpa:
+    database: MYSQL
+    hibernate:
+      ddl-auto: update
+      dialect: org.hibernate.dialect.MySQL8Dialect
+      jdbc:
+        lob:
+          non_contextual_creation: true
+        time_zone: UTC
+    #show-sql: true
+    properties:
+      hibernate:
+        format_sql: true

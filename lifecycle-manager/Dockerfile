@@ -10,7 +10,7 @@ RUN ./gradlew :lifecycle-manager:bootJar --no-daemon
 FROM eclipse-temurin:21-jre-jammy
 EXPOSE 8080
 COPY --from=build /app/lifecycle-manager/build/libs/app.jar /app.jar
-ARG LIFECYELE_DATABASE_URL
-ARG LIFECYELE_DATABASE_USERNAME
-ARG LIFECYELE_DATABASE_PASSWORD
+ARG LIFECYCLE_DATABASE_URL
+ARG LIFECYCLE_DATABASE_USERNAME
+ARG LIFECYCLE_DATABASE_PASSWORD
 ENTRYPOINT java -jar "/app.jar"
