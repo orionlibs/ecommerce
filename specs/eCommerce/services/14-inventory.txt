@@ -1,0 +1,430 @@
+Nice — below is a comprehensive, focused REST API design for an **Inventory Service**. It includes *only* endpoints that belong to inventory concerns: stock records, locations/warehouses, reservations/allocations, movements/adjustments, lots/serials/batches, counts (stocktakes), transfers, inbound receipts, snapshots & audits, connectors/imports, webhooks, metrics, admin/config and async jobs. I deliberately **do not** include carts, orders, payments, product CRUD, or pricing endpoints — those belong to other services and are referenced here by `sku` / `product_id` / `variant_id` only.
+
+Base conventions (apply across endpoints)
+
+* Base path: `https://api.example.com/v1/inventory`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths.
+* Content type: `application/json`. Bulk uploads can accept `multipart/form-data` or NDJSON.
+* Pagination: `page`/`limit` or cursor-based `cursor`.
+* Common query params: `location_id`, `sku`, `variant_id`, `status`, `from_date`, `to_date`, `sort`.
+* Common responses: `200 OK`, `201 Created`, `202 Accepted` (async job), `204 No Content`, `400`, `401`, `403`, `404`, `409` (conflict/optimistic lock), `422`, `500`.
+
+---
+
+# 1. Stock records (canonical on-hand + available view)
+
+Manage per-SKU/variant stock records and expose canonical availability metrics.
+
+* `GET /v1/inventory/stock`
+  Purpose: List stock records. Query: `sku`, `variant_id`, `location_id`, `status=on_hand|available|reserved|incoming`, `min_available`, `page`, `limit`, `sort`.
+  Response: paged list of stock records with fields below.
+
+* `GET /v1/inventory/stock/{stockRecordId}`
+  Purpose: Retrieve a single stock record (per location + SKU variant). Supports `expand=location,lot,serials`.
+
+* `POST /v1/inventory/stock`
+  Purpose: Create or upsert a stock record (rare — typically created by receipts). Body: `{ "sku":"SKU123","variant_id":"v1","location_id":"loc_1","on_hand":100,"reserved":0,"incoming":0,"reorder_point":10,"safety_stock":5,"lead_time_days":7 }`
+  Response: `201` created/updated record.
+
+* `PATCH /v1/inventory/stock/{stockRecordId}`
+  Purpose: Partial update of stock record metadata (not counts) — e.g., reorder\_point, bin\_location, flags.
+
+* `GET /v1/inventory/stock/{stockRecordId}/availability`
+  Purpose: Return derived availability metrics: `on_hand`, `reserved`, `allocated`, `available = on_hand - reserved - allocated + incoming`, `committed_by_orders` (if integrated), `available_for_sale`. Query params: `hold_window_ms` to consider transient holds.
+
+---
+
+# 2. Stock movements & adjustments (single-item ops)
+
+Record physical & logical stock changes (receipts, shipments, corrections).
+
+* `POST /v1/inventory/movements`
+  Purpose: Record a movement/adjustment. Body:
+
+  ```json
+  {
+    "type":"receipt|shipment|adjustment|return|scrap",
+    "sku":"SKU123",
+    "variant_id":"v1",
+    "location_id":"loc_1",
+    "quantity": 10,
+    "unit":"pcs",
+    "reference":"PO-123|SO-456|adj-789",
+    "reason":"Initial stock load|customer_return|inventory_correction",
+    "lot_id":"lot_abc",        // optional
+    "serials":["s1","s2"],    // optional for serialized items
+    "metadata":{ }
+  }
+  ```
+
+  Response: `201` movement record (id + resulting on\_hand).
+
+* `GET /v1/inventory/movements`
+  Purpose: Query movements. Filter by `sku`, `location_id`, `type`, `from_date`, `to_date`, `reference`. Returns paginated movements.
+
+* `GET /v1/inventory/movements/{movementId}`
+
+* `POST /v1/inventory/movements/bulk`
+  Purpose: Bulk import of movements (NDJSON/multipart). Async → returns job id.
+
+---
+
+# 3. Reservations / Holds / Allocations (for orders & carts)
+
+APIs to create ephemeral and persistent reservations (distinct from cart service — inventory only).
+
+* `POST /v1/inventory/reservations`
+  Purpose: Reserve inventory for a consumer (order, checkout hold, allocation). Body:
+
+  ```json
+  {
+    "reference_type":"order|checkout|allocation",
+    "reference_id":"order_123",
+    "lines":[ { "sku":"SKU1","variant_id":"v1","location_id":"loc_1","quantity":2, "lot_preference":"first_expiring" } ],
+    "expires_at":"2025-08-30T12:00:00Z",   // optional TTL for ephemeral holds
+    "hold_reason":"checkout_hold",
+    "metadata":{ "session_id":"s_1" }
+  }
+  ```
+
+  Response: `201` reservation id with per-line reservation details and `status: reserved|partial|failed`. Use optimistic locking to avoid oversell.
+
+* `GET /v1/inventory/reservations/{reservationId}`
+
+* `GET /v1/inventory/reservations`
+  Purpose: List reservations by `reference_id`, `user_id`, `status`, `expires_before`.
+
+* `POST /v1/inventory/reservations/{reservationId}/confirm`
+  Purpose: Convert reservation to a committed allocation (typically upon order capture). Response: updated status.
+
+* `POST /v1/inventory/reservations/{reservationId}/release`
+  Purpose: Release/cancel reservation (freeing reserved quantity). Body optional: `reason`.
+
+* `POST /v1/inventory/reservations/{reservationId}/extend`
+  Purpose: Extend TTL.
+
+* `POST /v1/inventory/reservations/bulk/release`
+  Purpose: Bulk release expired or cancelled reservations (async job).
+
+Notes: Reservation API must support idempotency keys and return conflict (409) on allocation race — clients should handle retries.
+
+---
+
+# 4. Transfers between locations / internal moves
+
+Manage inventory transfer requests between warehouses/locations.
+
+* `POST /v1/inventory/transfers`
+  Purpose: Create transfer request. Body:
+
+  ```json
+  {
+    "from_location_id":"loc_a",
+    "to_location_id":"loc_b",
+    "lines":[{"sku":"SKU1","variant_id":"v1","quantity":10,"lot_id":"lot1"}],
+    "eta":"2025-09-02T09:00:00Z",
+    "priority":"normal|urgent",
+    "reference":"transfer_001"
+  }
+  ```
+
+  Response: `201` transfer id with `status: created|in_transit|completed|cancelled`.
+
+* `GET /v1/inventory/transfers/{transferId}`
+
+* `PATCH /v1/inventory/transfers/{transferId}` — update ETA/status (partial).
+
+* `POST /v1/inventory/transfers/{transferId}/receive`
+  Purpose: Mark items received at destination (creates receipt movements).
+
+* `POST /v1/inventory/transfers/{transferId}/cancel`
+
+* `GET /v1/inventory/transfers` — list/filter by status, from/to location, date range.
+
+---
+
+# 5. Lots / Batches / Expiration tracking
+
+Support batch-managed inventory and expiry-first allocation.
+
+* `POST /v1/inventory/lots`
+  Purpose: Create lot/batch metadata (often created on receipt). Body: `{ "lot_code":"L202508","sku":"SKU1","location_id":"loc_1","quantity":100,"manufacture_date":"...", "expiry_date":"...", "metadata":{ } }` → `201`.
+
+* `GET /v1/inventory/lots/{lotId}`
+
+* `GET /v1/inventory/lots` — query by `sku`, `expiry_before`, `location_id`, `status`.
+
+* `PATCH /v1/inventory/lots/{lotId}` — adjust remaining qty, set quarantine.
+
+* `POST /v1/inventory/lots/{lotId}/reserve` — reserve from specific lot.
+
+* `POST /v1/inventory/lots/{lotId}/split` — split into two lots (quantities).
+
+* `POST /v1/inventory/lots/bulk/expire` — mark expired (async job).
+
+---
+
+# 6. Serial numbered stock (serialized items)
+
+Track items by serial number (unique unit-level tracking).
+
+* `POST /v1/inventory/serials`
+  Purpose: Register serials for received product units. Body: `{ "sku":"SKU1","location_id":"loc1","serials":["SN1","SN2"], "lot_id":"lotX" }` → returns per-serial records.
+
+* `GET /v1/inventory/serials/{serial}` — retrieve serial status (assigned/reserved/sold/retired), history.
+
+* `POST /v1/inventory/serials/{serial}/transfer` — transfer a serial to another location.
+
+* `POST /v1/inventory/serials/{serial}/decommission` — scrap or retire a serial.
+
+* `GET /v1/inventory/serials` — search by `sku`, `status`, `location`, `owner`.
+
+---
+
+# 7. Stocktake / Physical counts / adjustments workflow
+
+Count, reconcile and adjust on-hand quantities.
+
+* `POST /v1/inventory/stocktakes`
+  Purpose: Start a stocktake. Body: `{ "location_id":"loc1","name":"Q3-count","started_by":"user_1","scheduled_at":"2025-09-01T08:00:00Z" }` → returns `stocktake_id`.
+
+* `POST /v1/inventory/stocktakes/{stocktakeId}/lines`
+  Purpose: Upload counted lines (array) or stream NDJSON: `{ "sku":"SKU1","counted":50,"lot_id":"lot1","serials":[...],"notes":"..." }`.
+
+* `GET /v1/inventory/stocktakes/{stocktakeId}` — get progress, variance summary.
+
+* `POST /v1/inventory/stocktakes/{stocktakeId}/reconcile`
+  Purpose: Generate adjustment movements to align system on\_hand to counted quantities. Returns list of proposed adjustments for approval.
+
+* `POST /v1/inventory/stocktakes/{stocktakeId}/apply`
+  Purpose: Apply approved adjustments (creates movements). Async job.
+
+* `GET /v1/inventory/stocktakes` — list past stocktakes and reports.
+
+---
+
+# 8. Incoming receipts & expected inventory (PO integration)
+
+Record expected inbound receipts for better available calculation.
+
+* `POST /v1/inventory/receipts`
+  Purpose: Register expected inbound receipt (from PO). Body: `{ "po_reference":"PO-123","sku":"SKU1","variant_id":"v1","location_id":"loc_1","expected_quantity":100,"expected_date":"2025-09-05","lot_info":{...} }` → `201` receipt id with status `expected`.
+
+* `GET /v1/inventory/receipts/{receiptId}`
+
+* `POST /v1/inventory/receipts/{receiptId}/confirm`
+  Purpose: Confirm actual receipt (creates movements). Body: actual quantities, serials, lots.
+
+* `GET /v1/inventory/receipts` — list upcoming receipts.
+
+---
+
+# 9. Reorder points, thresholds, and replenishment signals
+
+Expose thresholds & signals for procurement/autoreplenish (actual ordering happens in procurement service).
+
+* `GET /v1/inventory/reorder-rules`
+  Purpose: List reorder rules by SKU/location.
+
+* `POST /v1/inventory/reorder-rules`
+  Purpose: Create rule `{ "sku":"SKU1","location_id":"loc_1","reorder_point":20,"reorder_qty":200,"min_order_multiple":50,"lead_time_days":7,"safety_stock":5 }`
+
+* `PATCH /v1/inventory/reorder-rules/{id}` / `DELETE /v1/inventory/reorder-rules/{id}`
+
+* `GET /v1/inventory/replenishment-signals`
+  Purpose: Compute currently-triggered reorder signals (optionally `?dry_run=true`); supports filters and returns suggested PO qty and target vendor. Typically used by Procurement connector.
+
+* `POST /v1/inventory/replenishment-signals/compute`
+  Purpose: Async compute for large catalogs; returns job id.
+
+---
+
+# 10. Availability queries & hold checks (fast reads)
+
+Low-latency availability checks for front-end and checkout flows (read-only, may be cached).
+
+* `GET /v1/inventory/availability?sku=SKU1&location_id=loc_1&quantity=2`
+  Purpose: Return `available:true|false` and details on where available, expiry/lot info.
+
+* `POST /v1/inventory/availability/batch`
+  Purpose: Batch check availability for many SKUs (POST with `[{sku,location_id,qty}]`).
+
+* `GET /v1/inventory/availability/nearby?sku=SKU1&lat=...&lon=...&max_km=50`
+  Purpose: Find locations with availability (if geo-enabled).
+
+---
+
+# 11. Bulk operations & import/export
+
+Large-scale sync, backfills, and migration endpoints.
+
+* `POST /v1/inventory/imports`
+  Purpose: Start an import job (CSV/NDJSON/S3). Body: `{ "source":"s3://...|upload","mode":"upsert|replace","mappings":{...} }` → returns job id.
+
+* `GET /v1/inventory/imports/{jobId}` — status/errors.
+
+* `POST /v1/inventory/exports`
+  Purpose: Export stock snapshot for BI. Body: filters + destination. Returns job id and download link.
+
+* `POST /v1/inventory/bulk/movements`
+  Purpose: Bulk movements/mutations (NDJSON). Async job.
+
+* `POST /v1/inventory/bulk/adjustments` — scheduled corrections.
+
+---
+
+# 12. Connectors / integrations
+
+ERP, WMS, 3PL and marketplace connector endpoints.
+
+* `GET /v1/inventory/connectors`
+
+* `POST /v1/inventory/connectors` `{ "type":"erp|wms|3pl|marketplace","config":{...},"direction":"inbound|outbound|bidirectional","sync_schedule":"cron" }` → returns connector id.
+
+* `POST /v1/inventory/connectors/{id}/run` — trigger immediate sync.
+
+* `GET /v1/inventory/connectors/{id}/logs`
+
+* `POST /v1/inventory/connectors/{id}/ack` — ack events from external system.
+
+---
+
+# 13. Webhooks & events
+
+Notify other services when stock changes, reservations expire, receipts arrive, transfer complete, low-stock alerts.
+
+* `GET /v1/inventory/webhooks`
+
+* `POST /v1/inventory/webhooks` `{ "url":"https://...","events":["stock.changed","reservation.created","reservation.expired","receipt.confirmed","transfer.completed","low_stock"], "secret":"..." }` → `201`.
+
+* `DELETE /v1/inventory/webhooks/{id}`
+
+* `POST /v1/inventory/webhooks/test` — send test payload.
+
+Events emitted should include before/after quantities and references.
+
+---
+
+# 14. Audit logs & history
+
+Immutable records for compliance; link to movements/reservations.
+
+* `GET /v1/inventory/audit`
+  Purpose: Query audit by `actor_id`, `action`, `sku`, `location_id`, `from_date`, `to_date`. Returns paginated audit events.
+
+* `GET /v1/inventory/audit/{eventId}`
+
+* `POST /v1/inventory/audit/export` — export audit for compliance/legal.
+
+---
+
+# 15. Metrics, snapshots & reporting
+
+Operational metrics and snapshots for analytics.
+
+* `GET /v1/inventory/metrics`
+  Purpose: Query metrics (`on_hand_total`, `available_total`, `reserved_total`, `incoming_total`, `turnover_rate`, `days_of_stock`) with `range` params.
+
+* `GET /v1/inventory/stock-snapshots`
+  Purpose: List historical snapshots (daily/hourly). Query: `date`, `location_id`, `sku`.
+
+* `POST /v1/inventory/stock-snapshots`
+  Purpose: Trigger snapshot creation (async job id).
+
+* `GET /v1/inventory/reports/low-stock`
+  Purpose: Low-stock reports per SKU/location (threshold-driven).
+
+* `GET /v1/inventory/reports/aging`
+  Purpose: Aging of inventory by lot/sku (days in stock).
+
+---
+
+# 16. Admin / settings / quotas / capabilities
+
+Service-level settings and tenant-level configuration.
+
+* `GET /v1/inventory/settings`
+  Purpose: Tenant settings (default lead time, allow\_negative\_stock, reservation\_ttl\_default, serial\_tracking\_enabled).
+
+* `PATCH /v1/inventory/settings` — update admin settings.
+
+* `GET /v1/inventory/quotas` / `PATCH /v1/inventory/quotas` — quotas for API calls, storage.
+
+* `GET /v1/inventory/capabilities` — features enabled for tenant (lot\_tracking, serial\_tracking, 3pl\_connectors, geo\_availability).
+
+---
+
+# 17. Health & diagnostics
+
+Service health and debug endpoints.
+
+* `GET /v1/inventory/health` — subsystem health (db, message queue, connector workers, cache).
+* `GET /v1/inventory/diagnostics` — current locks, inflight reservation counts, slow queries.
+
+---
+
+# 18. Concurrency & conflict/locking helpers
+
+APIs to support safe concurrent updates.
+
+* `POST /v1/inventory/locks`
+  Purpose: Create short-lived lock for a stock record (use carefully). Body: `{ "stock_record_id":"...", "ttl_ms":30000, "purpose":"reserve-checkout" }` → returns lock token.
+
+* `DELETE /v1/inventory/locks/{lockId}`
+
+* `PATCH /v1/inventory/stock/{stockRecordId}?if_version=123`
+  Purpose: Use optimistic concurrency via `if_version` header/param; 409 on mismatch.
+
+---
+
+# Example canonical StockRecord resource
+
+```json
+{
+  "id": "stock_0001",
+  "sku": "SKU-123",
+  "variant_id": "v1",
+  "location_id": "loc_1",
+  "on_hand": 125,
+  "reserved": 8,
+  "allocated": 2,
+  "incoming": 50,
+  "available": 115,
+  "unit": "pcs",
+  "reorder_point": 20,
+  "safety_stock": 5,
+  "lead_time_days": 7,
+  "lot_tracking": true,
+  "serial_tracking": false,
+  "bin_location": "A1-23",
+  "last_movement_at": "2025-08-29T12:00:00Z",
+  "version": 42,          // optimistic concurrency token
+  "metadata": { "preferred_supplier":"vendor_5" }
+}
+```
+
+---
+
+# Design notes & best practices (short)
+
+* **Single source of truth**: Inventory service owns on-hand/reserved/incoming values and exposes canonical `available` calculation. Other services reference it for final availability decisions.
+* **Separation of concerns**: reservations/holds are separate from cart service — inventory only tracks reservations and TTLs; order finalization should `confirm` reservations.
+* **Optimistic concurrency + idempotency**: use version tokens (`if_version`) and idempotency keys on mutation endpoints to avoid oversell and duplication. Return `409` with current state for retries.
+* **Async for heavy ops**: large imports, snapshots, and bulk movements should be async with job endpoints.
+* **Reservation race handling**: reservations should be designed as idempotent (with client-supplied idempotency key), and the API returns exact per-line reserved qty and reasons for partial failures.
+* **Preserve audit trail**: every movement/reservation must be auditable (actor, reference, timestamp, before/after quantities).
+* **Support lot & serial allocation policies**: FIFO, FEFO (first-expiring-first-out), explicit-lot selection for regulated products.
+* **Low-latency read path**: provide cached read endpoints for availability (edge cache/Redis) to serve storefronts; ensure near-real-time invalidation on reservations/movements.
+* **Integrations**: provide connectors for ERP/WMS/3PL to keep on-hand reconciled; accept inbound receipts and push outbound shipment events.
+* **Testing tools**: include a `dry_run=true` mode for transfers/reservations and simulation endpoints for stress testing allocation logic.
+* **Observability**: expose per-SKU/time throughput, reserve expiry rates, oversell incidents, and reconciliation deltas.
+
+---
+
+If you want I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`/stock`, `/reservations`, `/movements`, `/transfers`, `/receipts`),
+* design exact **request/response JSON schemas** for reservation and movement flows (including idempotency examples and conflict handling),
+* or draft a **race-free reservation algorithm** (pseudocode + DB schema suggestions) for high-concurrency checkout traffic.
+
+Which next deliverable would you like?

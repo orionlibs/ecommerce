@@ -1,0 +1,350 @@
+# Customer Order Management Backend & Admin Order Management Backend — REST API surface
+
+Nice — below are two **separate** but related REST API surfaces you should build:
+
+1. **Customer Order Management Backend Service** — read / self-service operations exposed to storefronts and mobile apps (what customers see & do).
+2. **Admin Order Management Backend Service** — agent/CS/admin UI backend (rich controls for support, edits, fulfillment, returns, reconciliation, tasks, exports).
+
+Both services are *presentation/orchestration* layers that call and coordinate the canonical Order, Fulfillment, Billing, Payments, Inventory and other domain services. They **do not** own core order state (creation/cancellation in the canonical sense) — instead they call the Order Management Service for authoritative changes. I list only endpoints that belong to these two backend services (customer-facing and admin-facing concerns).
+
+Common conventions (applies to both)
+
+* Base path examples:
+
+  * Customer: `https://api.example.com/v1/customer/orders`
+  * Admin: `https://api.example.com/v1/admin/orders`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Customer tokens for customer service; admin/service tokens + RBAC for admin service. Tenant via `X-Tenant-ID`.
+* Content-type: `application/json`. Bulk endpoints accept NDJSON or file pointer.
+* Pagination: `cursor`/`limit`, or `page`/`limit`.
+* Idempotency: all mutating endpoints accept `Idempotency-Key`.
+* Concurrency: use `If-Match`/ETag or `version` for optimistic locking on edits.
+* Standard responses: `200`, `201`, `202`, `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+
+---
+
+# 1 — Customer Order Management Backend Service
+
+Purpose: lightweight, low-latency endpoints used by storefronts & mobile apps so customers can view & self-serve their orders (tracking, returns, cancellations requests, reorder, invoices, messages). These endpoints orchestrate calls to Order, Fulfillment, Billing, Promotions, and Shipping services.
+
+## Order retrieval & list
+
+* `GET /v1/customer/orders`
+  List the caller’s orders. Query: `status`, `from`, `to`, `limit`, `cursor`, `channel`. Returns minimal order summaries (id, status, totals, created\_at, primary\_shipment\_status).
+
+* `GET /v1/customer/orders/{orderId}`
+  Full order view for owning customer. Query `expand=lines,shipments,invoices,events`. Returns user-visible fields only (no internal-only fields).
+
+* `GET /v1/customer/orders/{orderId}/timeline`
+  Human-friendly timeline (status updates, shipment events, payment events) suitable for UI.
+
+## Tracking & shipment
+
+* `GET /v1/customer/orders/{orderId}/shipments`
+  List shipments for the order (tracking numbers, carrier, ETA).
+
+* `GET /v1/customer/shipments/{trackingNumber}/track`
+  Live tracking summary (may proxy carrier or pull from Tracking Service).
+
+* `GET /v1/customer/orders/{orderId}/label/{shipmentId}`
+  Download packing slip / label (presigned URL).
+
+## Documents & invoices
+
+* `GET /v1/customer/orders/{orderId}/invoice`
+  Get invoice summary and presigned PDF link (delegates to Billing Service).
+
+* `GET /v1/customer/orders/{orderId}/documents`
+  Packing slip, invoice, customs docs.
+
+## Self-service actions (customer-initiated, may create requests or calls to Order Service)
+
+> Important: these are *requests* that the backend can validate & forward to canonical services. If a critical business action is required (refund, cancel), the backend will call Order/Billing/Promotions and return outcome.
+
+* `POST /v1/customer/orders/{orderId}/cancel-request`
+  Request cancellation (returns `request_id`, `status`, `blocked_reasons` if any: already shipped, payment captured, third-party constraints).
+
+* `POST /v1/customer/orders/{orderId}/return-request`
+  Initiate a return/RMA request. Body: `{ lines:[{lineId,qty,reason}], preferred_refund:"card|store_credit", pickup_or_dropoff }` → returns RMA instructions and `rma_id`.
+
+* `GET /v1/customer/returns/{rmaId}`
+  Return status & instructions.
+
+* `POST /v1/customer/orders/{orderId}/replace-request`
+  Request replacement (exchange) for items.
+
+* `POST /v1/customer/orders/{orderId}/reorder`
+  Create a new cart / order request to reorder same items (returns `cart_id` or `order_link` — actual order creation done elsewhere).
+
+* `POST /v1/customer/orders/{orderId}/update-address`
+  Request change of shipping address pre-shipment (validated and forwarded to Order Service/Carrier).
+
+* `POST /v1/customer/orders/{orderId}/apply-coupon` *(optional UX)*
+  Validate & preview application of coupon codes to order (non-consuming preview); for checkout only.
+
+## Communication & support
+
+* `GET /v1/customer/orders/{orderId}/messages`
+  Conversation between customer & support regarding the order.
+
+* `POST /v1/customer/orders/{orderId}/messages`
+  Send message / attach file → pushes to Admin backend's case system and notifies CS.
+
+* `GET /v1/customer/orders/{orderId}/faq`
+  Return order-related FAQ items or dynamic help (fraud, delivery windows).
+
+## Notifications & opt-ins
+
+* `POST /v1/customer/orders/{orderId}/notify`
+  Subscribe/unsubscribe to shipment updates (email/SMS/push) for that order.
+
+## Lightweight read-only search / guest lookup
+
+* `GET /v1/customer/orders/lookup?email=...&order_number=...`
+  Guest order lookup using email + order number + verification token.
+
+## Metrics & history (customer view)
+
+* `GET /v1/customer/orders/metrics`
+  Customer-specific summary: total\_spend, orders\_count, average\_order\_value (for profile page).
+
+## Security & privacy
+
+* `POST /v1/customer/gdpr/erase-request`
+  Customer-initiated erasure request for their data related to orders (starts a workflow; backend reports status).
+
+---
+
+# 2 — Admin Order Management Backend Service
+
+Purpose: full-featured admin/CS console backend for agents and operators. Rich control plane to inspect, edit, recover, escalate, reconcile and manage orders on behalf of customers. This service orchestrates canonical writes via Order/Billing/Fulfillment/Inventory/Payments services, implements business rules for edits, and provides admin-only tooling (task queue, bulk ops, exports). Only include admin-scoped operations (requires RBAC).
+
+## Order search & listing (operator UI)
+
+* `POST /v1/admin/orders/search`
+  Powerful search DSL: filters (customer, dates, status, external\_ref, sku, tracking\_number, payment\_status), aggregations, full-text across notes/addresses, pagination.
+
+* `GET /v1/admin/orders/{orderId}`
+  Full canonical order with expanded internals (payments, fulfillment, audit, events). `expand` options for `raw_events`, `reconciliation`.
+
+* `GET /v1/admin/orders/{orderId}/audit`
+  Full audit trail of operations across services (who changed what, correlation ids).
+
+## Actions (controlled state transitions & admin operations)
+
+> These endpoints coordinate canonical services and must produce clear audit logs.
+
+* `POST /v1/admin/orders/{orderId}/hold`
+  Place order on hold (reason, agent\_id, duration).
+
+* `POST /v1/admin/orders/{orderId}/release`
+  Release hold (with resolution notes).
+
+* `POST /v1/admin/orders/{orderId}/force-cancel`
+  Force-cancel order (admin). Body: `{ refund:true|false, restock:true|false, reason }` → kicks off Billing/Inventory/Returns flows. Idempotent + audited.
+
+* `POST /v1/admin/orders/{orderId}/approve-cancel`
+  Approve previously requested cancellation.
+
+* `POST /v1/admin/orders/{orderId}/confirm`
+  Confirm order that’s pending (after manual checks).
+
+* `POST /v1/admin/orders/{orderId}/close` / `/reopen` — admin close/reopen.
+
+## Edits, quotes & amendments (safe-edit flow)
+
+* `POST /v1/admin/orders/{orderId}/quote`
+  Create an edit quote for modifications (change lines/qty/shipping). Returns `quote_id` with delta and required refunds/charges.
+
+* `GET /v1/admin/quotes/{quoteId}` / `PATCH /v1/admin/quotes/{quoteId}` / `POST /v1/admin/quotes/{quoteId}/apply`
+  Apply or abort an edit (applies canonical changes via Order/Billing/Payments/Inventory). All steps are auditable.
+
+* `POST /v1/admin/orders/{orderId}/adjust-price`
+  Manual price adjustment on a line or order-level credit/debit (creates credit note or invoice adjustment via Billing).
+
+## Fulfillment & shipment management
+
+* `POST /v1/admin/orders/{orderId}/create-fulfillment`
+  Create a fulfillment request to WMS/3PL (specify warehouse, lines, lot/serial). Returns `fulfillment_id`.
+
+* `POST /v1/admin/fulfillments/{fulfillmentId}/ship`
+  Mark fulfillment shipped, attach tracking, upload label; triggers customer notification.
+
+* `POST /v1/admin/fulfillments/{fulfillmentId}/cancel` / `/reschedule`
+
+* `GET /v1/admin/shipments/{shipmentId}/label`
+  Get shipping label or regenerate label.
+
+* `POST /v1/admin/orders/{orderId}/split-shipments`
+  Propose/execute split shipments.
+
+## Returns / RMAs / inspections
+
+* `GET /v1/admin/returns/{returnId}` — full RMA details & inspection history.
+
+* `POST /v1/admin/returns/{returnId}/approve`
+  Approve RMA and issue return label or pickup.
+
+* `POST /v1/admin/returns/{returnId}/inspect`
+  Record inspection result (condition, restockable, disposition) and propose refund/credit.
+
+* `POST /v1/admin/returns/{returnId}/issue-refund`
+  Trigger refund/credit note (calls Billing/Payments) with idempotency + audit.
+
+## Payments & refunds orchestration (admin actions)
+
+* `GET /v1/admin/orders/{orderId}/payments` — list linked payments and settlements.
+
+* `POST /v1/admin/payments/{paymentId}/capture` — request manual capture (via Payment Service).
+
+* `POST /v1/admin/payments/{paymentId}/refund` — operator-initiated refund (partial or full) with reason; returns `refund_id`.
+
+* `POST /v1/admin/payments/{paymentId}/reconcile` — manual reconciliation tool to link external settlement.
+
+## Fraud, KYC & manual review
+
+* `GET /v1/admin/orders/fraud` — list orders flagged for fraud (filters: risk\_score, rule\_trigger).
+
+* `POST /v1/admin/orders/{orderId}/flag-fraud` / `/unflag` — attach fraud case and escalate.
+
+* `POST /v1/admin/orders/{orderId}/assign-review` — assign to agent/team with notes.
+
+## Customer support & case management
+
+* `GET /v1/admin/orders/{orderId}/cases` — support case list associated with order.
+
+* `POST /v1/admin/orders/{orderId}/cases` — create support case / incident, attach notes, evidence, customer messages.
+
+* `POST /v1/admin/orders/{orderId}/notes` — add internal/public notes; support attachments.
+
+* `POST /v1/admin/orders/{orderId}/impersonate-customer` — create a short-lived impersonation token to act as the customer in customer APIs (must be audited and gated with RBAC). Returns `impersonation_token`.
+
+## Bulk operations & imports
+
+* `POST /v1/admin/orders/bulk/update-status` — bulk update (async job) with filter and action (careful with side-effects).
+
+* `POST /v1/admin/orders/import` — helper to import external order corrections/patches (async with dry-run).
+
+* `POST /v1/admin/orders/exports` — export filtered order dataset to S3/Parquet/CSV for finance/audit.
+
+## Work queues, tasks & SLAs
+
+* `GET /v1/admin/queues` — list agent queues (returns counts, SLA breaches).
+
+* `POST /v1/admin/queues/{queueId}/claim` — claim an order/case to work on.
+
+* `POST /v1/admin/tasks` — create operational tasks (pickup, call customer, escalate).
+
+* `GET /v1/admin/tasks` — list tasks for agent/team.
+
+## Audit, compliance & legal tools
+
+* `GET /v1/admin/orders/{orderId}/audit` — detailed audit trail (who/when/what).
+
+* `POST /v1/admin/orders/{orderId}/legal-hold` — apply legal hold preventing destructive ops.
+
+* `POST /v1/admin/gdpr/export` — export a subject’s order data for compliance.
+
+## Reconciliation & finance links
+
+* `GET /v1/admin/orders/{orderId}/reconciliation` — reconciliation report (payments vs invoices vs order totals).
+
+* `POST /v1/admin/orders/{orderId}/reconcile` — operator-driven reconciliation (attach evidence and apply mapping).
+
+## Integration & connectors control
+
+* `GET /v1/admin/connectors` — list 3PL/payment/billing connectors and their statuses.
+
+* `POST /v1/admin/connectors/{id}/run` — re-run or re-sync order or fulfillment to connector.
+
+## Monitoring, metrics & dashboards
+
+* `GET /v1/admin/metrics/orders` — KPIs: order throughput, time-to-ship, dispute rate, CS response times.
+
+* `GET /v1/admin/alerts` — operational alerts for order issues.
+
+## Admin-level webhooks & event replay
+
+* `GET /v1/admin/webhooks` / `POST /v1/admin/webhooks` — admin subscriptions to order events.
+
+* `POST /v1/admin/orders/{orderId}/replay-events` — ask order history to replay events to a target (diagnostic).
+
+## RBAC, keys & security
+
+* `GET /v1/admin/permissions/me` — check operator permissions.
+
+* `GET /v1/admin/keys` / `POST /v1/admin/keys` — create scoped API keys for integrations.
+
+## Examples of admin-only safeguards
+
+* endpoints requiring `X-Admin-Auth-Sudo` header for destructive operations; audit reason required in body for cancel/force-refund.
+
+---
+
+# 3 — Shared cross-cutting endpoints (both services may implement them)
+
+* `GET /v1/.../capabilities` — which features are enabled for tenant (returns flags: returns\_enabled, reorder\_enabled, store\_credit).
+* `GET /v1/.../health` — service health.
+* `GET /v1/.../settings` — tenant-level settings relevant to this UI layer (max editable window, allowed cancellations window, allowed shipping-change window).
+* `GET /v1/.../rate-limits` — API usage/quota.
+
+---
+
+# 4 — Design & implementation notes (best practices)
+
+* **Presentation vs canonical:** these backend services are orchestration/presentation layers. **Do not** duplicate canonical order state — call the Order Management Service for authoritative state changes and snapshot results for UI rendering. Persist only necessary cached view data if you need low-latency responses (with TTLs and invalidation hooks).
+* **Idempotency & atomicity:** all operations that trigger external side-effects (refunds, cancellations, fulfillment creation) must be idempotent and produce an audit record. Use `Idempotency-Key` and return the same resource on retries.
+* **Optimistic concurrency:** use `version`/ETag + `If-Match` for edits. Return `409` with current state to allow the UI to re-sync.
+* **Audit & explainability:** every action (customer or admin) must be logged with actor id, actor role, IP, reason and correlation id. For admin impersonation, record original admin id and expiration.
+* **RBAC & separation of duties:** the admin API should enforce role checks (billing, collections, fulfillment, CS) and require higher privileges for destructive actions. Consider an approval workflow for high-risk actions.
+* **Feature flags & tenant config:** allow tenant-level toggles (allow-cancel-after-shipment=false). UI backends should consult `settings` endpoint and enforce.
+* **Security & PII:** redact sensitive fields in customer-facing APIs. Admin APIs should support access logs for PII access and have stricter logging/retention rules.
+* **Error model:** return machine-readable error codes (e.g., `order.blocked.already_shipped`, `refund.failed.no_payment`, `return.not_eligible`) with `explain` and actionable next steps.
+* **Workflows & async jobs:** heavy or multi-step operations (bulk refunds, exports, replays) should be async with job endpoints and progress polling.
+* **Notifications & events:** emit domain events for key actions (`admin.cancelled`, `customer.return_requested`) to the event bus so other services can react (fulfillment, billing).
+* **Testing & dry-run:** provide `dry_run=true` options for admin edits/quote APIs so agents can preview effects without committing.
+* **Observability:** instrument operation latencies, failure reasons, number of escalations, and SLA breaches for CS.
+
+---
+
+# 5 — Minimal example flows (quick reference)
+
+**Customer: view order**
+
+```
+GET /v1/customer/orders?limit=20
+GET /v1/customer/orders/{orderId}?expand=shipments,invoices
+```
+
+**Customer: request a return**
+
+```
+POST /v1/customer/orders/{orderId}/return-request
+Body: { lines:[{lineId,qty,reason}], preferred_refund:"card" }
+Response: { rma_id, instructions, status:"requested" }
+```
+
+**Admin: create edit quote and apply**
+
+```
+POST /v1/admin/orders/{orderId}/quote
+Body: { changes:[{op:"replace",path:"/lines/1/quantity",value:1}] }
+GET /v1/admin/quotes/{quoteId}
+POST /v1/admin/quotes/{quoteId}/apply
+```
+
+**Admin: force cancel and issue refund**
+
+```
+POST /v1/admin/orders/{orderId}/force-cancel
+Body: { refund:true, reason:"fraud confirmed", restock:false }
+```
+
+---
+
+If you’d like I can next:
+
+* produce an **OpenAPI skeleton** for both services (customer endpoints + admin endpoints) focusing on the most-used flows (`GET order`, `return-request`, `cancel-request`, `quote -> apply`, `force-cancel`, `create-fulfillment`),
+* or create **JSON schemas** for `order view`, `return-request`, `quote` and `admin action` payloads with examples and error codes,
+* or design the **audit & impersonation model** (schema + sample audit events + retention rules).
+
+Which one should I generate now?

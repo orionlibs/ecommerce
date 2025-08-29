@@ -1,0 +1,356 @@
+Nice — here’s a full, focused design for the **Product Service** REST surface. I’ll only include endpoints that belong to the product/catalog domain (no carts, stock/availability, pricing engines, orders, shipping, payments, etc.). I’ll call out useful query params, auth scopes, common request/response fields, and cross-service notes where relevant (e.g., pricing or inventory handled by separate services).
+
+Base path assumed: `/api/v1` (replaceable). Common auth scopes shown (e.g. `product:read`, `product:write`, `product:admin`). All collection endpoints support `page`, `per_page`, `sort`, and common filters unless noted.
+
+# Product Service — REST API endpoints
+
+---
+
+## Product CRUD (core product resource)
+
+A **product** is the logical product (title, description, product type, vendor, metadata). Variants/SKUs are separate resources under each product.
+
+* `POST /stores/{storeId}/products`
+  Create a product. Body highlights: `title`, `handle/slug`, `type`, `vendor`, `description` (HTML/blocks), `status` (`draft|active|archived`), `tags`, `metadata` (arbitrary JSON), `default_variant_id` (optional), `collections` (ids), `attributes` (see attributes section), `relationships` (upsell/cross-sell ids).
+  Auth: `product:write` or `product:admin`
+  Response: `201 Created` with product resource.
+
+* `GET /stores/{storeId}/products`
+  List products. Useful query params: `q` (full-text), `handle`, `type`, `vendor`, `tag`, `collection_id`, `status`, `channel_id`, `created_after`, `updated_before`, `attribute:<key>=<value>` (attribute filters), `ids`, `include` (e.g., `variants,collections,media`), `fields` (projection).
+  Auth: `product:read`
+  Response: paginated list + links.
+
+* `GET /stores/{storeId}/products/{productId}`
+  Get full product detail (includes pointers to variants, media, attributes, collections). Option: `?include=variants,media,attributes`.
+  Auth: `product:read`
+
+* `PATCH /stores/{storeId}/products/{productId}`
+  Partial update (title, description, tags, metadata, status). Use `If-Match`/ETag for optimistic concurrency.
+  Auth: `product:write`
+
+* `PUT /stores/{storeId}/products/{productId}`
+  Replace entire product representation (rare).
+  Auth: `product:admin`
+
+* `DELETE /stores/{storeId}/products/{productId}`
+  Soft-delete or archive product; query `hard=true` for permanent delete.
+  Auth: `product:admin`
+
+* `POST /stores/{storeId}/products/{productId}/restore`
+  Restore a soft-deleted product (if soft-delete supported).
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/products/{productId}/history`
+  Get version history (who/when/diff).
+  Auth: `product:read`
+
+---
+
+## Variants / SKUs
+
+Variants are physical configurations (size/color) with SKU identifiers. **Note:** inventory & stock levels are managed by Inventory Service; product service stores SKU identifiers and variant metadata, plus pointers to pricing IDs.
+
+* `POST /stores/{storeId}/products/{productId}/variants`
+  Create variant. Body: `sku`, `barcode`, `attributes` (size,color...), `dimensions` (w/l/h/weight), `package_type`, `metadata`, `default_image_id` (media). Optionally `price_reference_id` if pricing service provides price IDs.
+  Auth: `product:write`
+
+* `GET /stores/{storeId}/products/{productId}/variants`
+  List variants for product. Query: `sku`, `barcode`, `ids`.
+  Auth: `product:read`
+
+* `GET /stores/{storeId}/products/{productId}/variants/{variantId}`
+  Get variant detail.
+
+* `PATCH /stores/{storeId}/products/{productId}/variants/{variantId}`
+  Update variant fields (attributes, dimensions, sku metadata).
+  Auth: `product:write`
+
+* `DELETE /stores/{storeId}/products/{productId}/variants/{variantId}`
+  Delete variant (or mark inactive).
+  Auth: `product:admin`
+
+* `POST /stores/{storeId}/products/{productId}/variants/bulk`
+  Bulk create/update variants (CSV/JSON). Returns job id.
+  Auth: `product:admin`
+
+---
+
+## Attributes & Attribute Definitions
+
+Attributes define product/variant dimensions (e.g., color, size). These are type definitions and allowed values.
+
+* `POST /stores/{storeId}/attribute-definitions`
+  Create attribute definition. Body: `key`, `display_name`, `type` (`string|enum|number|boolean|date`), `values` (if enum), `localizable` (bool), `variant_level` (bool), `metadata`.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/attribute-definitions`
+  List attribute definitions.
+
+* `GET /stores/{storeId}/attribute-definitions/{attrKey}`
+  Get attribute metadata.
+
+* `PATCH /stores/{storeId}/attribute-definitions/{attrKey}`
+  Update attribute definition (add values, change display name).
+  Auth: `product:admin`
+
+* `DELETE /stores/{storeId}/attribute-definitions/{attrKey}`
+  Delete/disable attribute (validate no dependent data).
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/products/attributes/values`
+  Helper to list all attribute values used across products (useful for filters/filters panel). Query: `key`, `limit`.
+
+---
+
+## Collections, Categories, Taxonomy
+
+Collections (manual & automated) and categories for organizing products.
+
+* `POST /stores/{storeId}/collections`
+  Create collection. Body: `title`, `handle`, `type` (`manual|smart`), `rules` (for smart collections), `description`, `seo`, `metadata`.
+  Auth: `product:write`
+
+* `GET /stores/{storeId}/collections`
+  List collections. Filter: `type`, `tag`, `product_id`.
+  Auth: `product:read`
+
+* `GET /stores/{storeId}/collections/{collectionId}`
+  Collection detail, including sample products (paginated). For smart collections include the evaluation preview.
+  Auth: `product:read`
+
+* `PATCH /stores/{storeId}/collections/{collectionId}`
+  Update collection metadata/rules.
+  Auth: `product:write`
+
+* `POST /stores/{storeId}/collections/{collectionId}/products`
+  Add product(s) to manual collection (body: `product_ids[]`).
+  Auth: `product:write`
+
+* `DELETE /stores/{storeId}/collections/{collectionId}/products/{productId}`
+  Remove product from collection.
+  Auth: `product:write`
+
+* `DELETE /stores/{storeId}/collections/{collectionId}`
+  Delete collection.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/categories`
+  Category tree for hierarchical taxonomies (if store uses categories instead of/with collections). Supports tree query param.
+  Auth: `product:read`
+
+* `POST /stores/{storeId}/categories` / `GET /stores/{storeId}/categories/{categoryId}`, `PATCH`, `DELETE`
+  CRUD for categories (parent-child, slugs, metadata).
+  Auth: `product:admin` or `product:write`
+
+---
+
+## Product Media / Images / Assets
+
+Media management for products (images, videos). Product Service may either host or reference Asset Service. Endpoints assume media stored in product service or via asset reference.
+
+* `POST /stores/{storeId}/products/{productId}/media`
+  Upload media (multipart). Body: `file`, `type` (`image|video`), `alt_text`, `position`, `metadata`. Returns media id & signed URLs.
+  Auth: `product:write` or `product:assets:write`
+
+* `GET /stores/{storeId}/products/{productId}/media`
+  List media for product (ordered). Query: `type`, `limit`.
+  Auth: `product:read`
+
+* `GET /stores/{storeId}/products/{productId}/media/{mediaId}`
+  Media metadata & signed download URL.
+
+* `PATCH /stores/{storeId}/products/{productId}/media/{mediaId}`
+  Update alt text, position, tags, featured flag.
+  Auth: `product:write`
+
+* `DELETE /stores/{storeId}/products/{productId}/media/{mediaId}`
+  Delete media.
+  Auth: `product:write`
+
+* `POST /stores/{storeId}/products/{productId}/media/sync`
+  (Optional) Sync media metadata from CDN/Asset Service.
+  Auth: `product:admin`
+
+---
+
+## Translations / Localization
+
+Products support localized fields (title, description, attribute values).
+
+* `GET /stores/{storeId}/products/{productId}/translations`
+  List available translations.
+  Auth: `product:read`
+
+* `POST /stores/{storeId}/products/{productId}/translations/{locale}`
+  Create/Update translation for locale. Body: localized fields.
+  Auth: `product:write`
+
+* `DELETE /stores/{storeId}/products/{productId}/translations/{locale}`
+  Remove translation.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/products/translations/export?locale=en-GB`
+  Export translations for a locale (CSV/JSON) for translators.
+  Auth: `product:admin`
+
+---
+
+## Product Relationships & Merchandising
+
+Upsells, cross-sells, bundles and product kits (logical relationships).
+
+* `POST /stores/{storeId}/products/{productId}/relations`
+  Add relationship. Body: `type` (`upsell|cross-sell|accessory|bundle|replacement`), `related_product_id`, `position`, `metadata`.
+  Auth: `product:write`
+
+* `GET /stores/{storeId}/products/{productId}/relations`
+  List related products (with relation types).
+
+* `DELETE /stores/{storeId}/products/{productId}/relations/{relationId}`
+  Remove relationship.
+  Auth: `product:write`
+
+* `POST /stores/{storeId}/bundles`
+  If product-bundles are first-class, create bundle product composed of product+variants with bundle rules (discounts/quantities). (Note: pricing/checkout behavior uses Pricing & Cart services.)
+  Auth: `product:admin`
+
+---
+
+## Publishing / Channel Exposure
+
+Products can be published to channels (which are part of Store Service). Product service stores publish state per channel (published draft, scheduled publish).
+
+* `POST /stores/{storeId}/products/{productId}/publish`
+  Publish product to channels. Body: `channel_ids`, `publish_at` (optional scheduled). Returns `publish_job_id`.
+  Auth: `product:write`
+
+* `POST /stores/{storeId}/products/{productId}/unpublish`
+  Unpublish from channel(s). Body: `channel_ids`.
+  Auth: `product:write`
+
+* `GET /stores/{storeId}/products/publish-status?job_id=...`
+  Check status of publish jobs.
+  Auth: `product:read`
+
+* `GET /stores/{storeId}/products/{productId}/visibility`
+  Return per-channel visibility and published\_at timestamps.
+
+---
+
+## Search & Indexing endpoints
+
+Admin endpoints to trigger indexing into search service / headless APIs; also provide search helper for admin UI. (Public storefront search would be served by Search service / CDN.)
+
+* `GET /stores/{storeId}/products/search`
+  Admin search with structured filters (q, filters on attributes, facets, sort). Response: hits + aggregations (facets). Supports `include=variants,media`.
+  Auth: `product:read`
+
+* `POST /stores/{storeId}/products/index`
+  Trigger reindex (full or partial). Body: `product_ids[]` or `full=true`. Returns `job_id`.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/products/index/jobs/{jobId}`
+  Job status & errors.
+  Auth: `product:read`
+
+---
+
+## Bulk Import / Export / Jobs
+
+Migrations, bulk edits, CSV/JSON imports.
+
+* `POST /stores/{storeId}/products/import`
+  Import file (CSV/ZIP/JSON). Options: `overwrite`, `skip_invalid`, `default_locale`. Returns `import_job_id`.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/products/import/{jobId}`
+  Import job status & CSV of errors.
+
+* `POST /stores/{storeId}/products/export`
+  Export product catalog subset. Query/body: `product_ids`, `collection_ids`, `fields`, `include_media=true`. Returns signed download link or `export_job_id`.
+  Auth: `product:admin` or `product:read`
+
+* `GET /stores/{storeId}/products/export/{jobId}`
+  Export job status & link.
+
+* `POST /stores/{storeId}/products/bulk`
+  Bulk endpoint for patching many products (JSON payload with operations). Returns `bulk_job_id`.
+  Auth: `product:admin`
+
+---
+
+## Audit Logs & Change History (product-scoped)
+
+Track edits for compliance and rollback.
+
+* `GET /stores/{storeId}/products/{productId}/audit-logs`
+  List audit events for product (who changed what). Query: `since`, `actor_id`.
+  Auth: `product:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/products/audit-logs`
+  Search product-level audit logs (across products).
+
+---
+
+## Webhooks & Events (subscribe to product events)
+
+Products emit events to other systems (search, storefront, PIM sync, feeds).
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook for product events (same webhook namespace as Store Service if shared). Body: `url`, `events` (e.g., `product.created`, `product.updated`, `product.deleted`, `variant.created`, `product.published`), `secret`, `active`.
+  Auth: `product:admin`
+
+* `GET /stores/{storeId}/webhooks` / `PATCH` / `DELETE` same as store-level webhooks.
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Delivery attempts and failures.
+  Auth: `product:admin`
+
+**Typical events**: `product.created`, `product.updated`, `product.deleted`, `variant.created`, `variant.updated`, `product.published`, `product.unpublished`, `product.media.added`.
+
+---
+
+## Helpers & Admin Support Endpoints
+
+* `GET /stores/{storeId}/products/suggestions?q=...` — autocomplete/title suggestions for admin UIs.
+* `GET /stores/{storeId}/products/template/{productType}` — return product form template (fields, attributes) for admin UI.
+* `GET /stores/{storeId}/products/sample-data` — seed sample products for dev/staging. Auth: `platform:admin` or `store:admin`.
+
+---
+
+## Integrations & Feed Exports
+
+Product feeds for marketplaces, PIM syncs, or external channels. The feed generation might be handled by a separate Feed Service; product service can provide feed-ready export endpoints.
+
+* `POST /stores/{storeId}/product-feeds`
+  Create feed configuration (marketplace, format, rules). Body: `format` (`csv|xml|json`), `rules` (include/exclude), `schedule`.
+  Auth: `product:admin`
+
+* `POST /stores/{storeId}/product-feeds/{feedId}/generate`
+  Generate feed now — returns `feed_job_id` and link.
+  Auth: `product:admin`
+
+---
+
+## Cross-cutting considerations (important)
+
+* **Separation of concerns**: inventory/stock → Inventory Service; pricing/price lists/promotions → Pricing Service; search indexing → Search Service; storefront/public reads → CDN/Storefront Service. Product Service stores product model + variant metadata + pointers (SKU, price\_reference\_id, inventory\_sku).
+* **Versioning & ETags**: support `If-Match` header for updates to prevent conflicts. Keep version history for product and variants.
+* **Drafts & Scheduling**: support draft state and scheduled publish per channel.
+* **Optimized include param**: `?include=variants,media,collections` to reduce round-trips.
+* **Lightweight public reads**: the product service exposes admin read endpoints; public storefront should read published product snapshots from a public product-feed or Search/Storefront service for scale.
+* **Data model**: product → variants → sku identifiers, attributes (structured), media references, collections/categories, relationships.
+* **Auditing**: every mutation logged for traceability.
+* **Rate limiting & pagination**: large catalogs need efficient cursor-based pagination for exports.
+* **Access control**: staff roles and per-channel scopes determine who can edit/publish specific fields.
+* **Validation rules**: ensure SKU uniqueness per store, valid attribute values (if enum), and safe deletion checks (e.g., referenced by active bundles/collections).
+
+---
+
+If you want, I can now:
+
+* generate OpenAPI snippets for the key endpoints (products, variants, media, collections), or
+* produce JSON schemas for `product`, `variant`, `attributeDefinition`, and `collection`, or
+* design the async job/job-status schema used by import/export/publish/index jobs.
+
+Pick one and I’ll produce it straight away.

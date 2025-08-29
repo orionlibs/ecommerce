@@ -1,0 +1,373 @@
+# Order Analytics & Reporting Service — REST API surface
+
+Nice — below is a comprehensive, focused REST API design for an **Order Analytics & Reporting Service**. This service ingests order/fulfillment/payment events (or reads them from event streams), computes rollups, KPIs, cohorts, funnels and advanced analytics, and provides queryable APIs, dashboards, scheduled reports, anomaly detection and exports for BI/ops. **Only** endpoints relevant to analytics/reporting are included (no order CRUD, fulfillment, billing, etc.).
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/order-analytics`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant-scoped via `X-Tenant-ID` header or tenant path `/v1/{tenantId}/order-analytics`.
+* Content-Type: `application/json`. Bulk ingestion accepts NDJSON or S3 pointer.
+* Time format: RFC3339 / ISO8601 with timezone. Use `start` and `end` params when appropriate.
+* Pagination: cursor-style `cursor` + `limit` (or `page`/`limit` for convenience).
+* Granularity: `granularity` values like `1m`, `5m`, `1h`, `1d`, `1w`, `1M`.
+* Response codes: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`.
+* Idempotency: ingestion / job-creating endpoints accept `Idempotency-Key`.
+* Aggregation semantics: server supports `aggregation` param: `sum|avg|min|max|count|p50|p90|p99`.
+* Typical dimensions: `channel`, `country`, `currency`, `sku`, `category`, `warehouse`, `payment_method`, `customer_segment`, `campaign`.
+
+---
+
+# 1 — Ingestion & connectors
+
+Accepts order events (or pointers) for analytics store.
+
+* `POST /v1/order-analytics/ingest`
+  Purpose: Push single or small batch of order-related events (order.created, order.updated, order.shipped, payment.succeeded, refund.issued, return.received). Body: JSON array or single event (NDJSON optional). Returns `202` with ingestion id(s).
+
+* `POST /v1/order-analytics/ingest/bulk`
+  Purpose: Bulk ingestion (NDJSON file upload or S3 pointer). Returns `202` with `job_id`.
+
+* `POST /v1/order-analytics/connectors`
+  Purpose: Register connectors (Kafka consumer, Kinesis, webhook, S3 poller). Body: `{type, config, filters}` → `201`.
+
+* `POST /v1/order-analytics/connectors/{id}/run`
+  Trigger immediate fetch / re-sync.
+
+* `GET /v1/order-analytics/connectors/{id}/status`
+  Connector health & lag.
+
+* `POST /v1/order-analytics/ingest/validate`
+  Validate sample payload against known schemas without persisting.
+
+---
+
+# 2 — Raw events & event-store queries
+
+Query individual order events used for ad-hoc analysis / auditing.
+
+* `GET /v1/order-analytics/events`
+  Purpose: Query raw events (filters: `order_id`, `type`, `source`, `from`, `to`, `customer_id`, `sku`). Supports cursor and `limit`. Returns event list with timestamps and payloads.
+
+* `GET /v1/order-analytics/events/{eventId}`
+  Retrieve a single parsed event.
+
+* `POST /v1/order-analytics/events/search`
+  Full-text or structured search across event payloads (DSL).
+
+---
+
+# 3 — Time-series KPIs & rollups
+
+Return common KPIs for dashboards; supports grouping and granularity.
+
+* `POST /v1/order-analytics/kpis/query`
+  Purpose: Single or multi-metric timeseries query. Body:
+
+  ```json
+  {
+    "metrics":["orders_count","revenue","aov","refund_amount","returns_count"],
+    "start":"2025-01-01T00:00:00Z",
+    "end":"2025-01-31T23:59:59Z",
+    "granularity":"1d",
+    "group_by":["channel","country"],
+    "filters":{"channel":["web","mobile"], "country":"GB"},
+    "aggregation":"sum"
+  }
+  ```
+
+  Response: time-buckets per group with metric values.
+
+* `GET /v1/order-analytics/kpis/summary`
+  Purpose: Quick summary (single call) for common KPIs over `start..end` for a tenant (today vs last period deltas).
+
+* `POST /v1/order-analytics/kpis/batch`
+  Purpose: Request many KPI queries at once (for dashboards). Returns job id if async.
+
+Common built-in metric names (examples): `orders_count`, `orders_paid`, `orders_shipped`, `revenue_gross`, `revenue_net`, `aov` (avg order value), `refund_amount`, `refund_rate`, `returns_count`, `discount_total`, `shipping_total`, `days_to_ship_avg`, `time_to_first_response` (CS), `conversion_rate`.
+
+---
+
+# 4 — Funnels & conversion analysis
+
+Measure step-based conversion funnels (visit → add-to-cart → checkout → payment → order).
+
+* `POST /v1/order-analytics/funnels/define`
+  Create or store a funnel definition. Body: `{ "name","steps":[{"event":"visit"},{"event":"add_to_cart"},{"event":"checkout_initiated"},{"event":"payment_succeeded"}], "window":"7d" }` → `201`.
+
+* `POST /v1/order-analytics/funnels/{funnelId}/query`
+  Run funnel analysis across `start..end`, group\_by, and return per-step counts, conversion rates, drop-offs, and time-between-steps distributions.
+
+* `POST /v1/order-analytics/funnels/adhoc`
+  Ad-hoc funnel request without storing.
+
+---
+
+# 5 — Cohorts, retention, RFM & LTV
+
+Segment customers by behavior and compute retention curves, lifetime value.
+
+* `POST /v1/order-analytics/cohorts/define`
+  Purpose: Define cohort (by acquisition week, first\_order\_date, campaign, or custom rule). Body: `{ "name","criteria":{...} }` → `201`.
+
+* `POST /v1/order-analytics/cohorts/{cohortId}/retention`
+  Compute retention table (periods, retention percentages) and cohort sizes.
+
+* `POST /v1/order-analytics/cohorts/adhoc-retention`
+  One-off retention query.
+
+* `POST /v1/order-analytics/customers/rfm`
+  Compute RFM (Recency-Frequency-Monetary) buckets for a timeframe; returns customer-level scores and aggregated buckets.
+
+* `POST /v1/order-analytics/customers/ltv`
+  Compute LTV per cohort or customer set (with lookback window and forecast horizon). Supports choice of model: `historical|predictive`.
+
+* `POST /v1/order-analytics/customers/segment`
+  Create dynamic segment by rules (spend > X and last\_order < Y) and return sample customer ids.
+
+---
+
+# 6 — Attribution & channels analysis
+
+Attribute revenue to campaigns/channels (last-touch, first-touch, multi-touch).
+
+* `POST /v1/order-analytics/attribution/query`
+  Body: `{ "method":"last_touch|first_touch|linear|time_decay|position","start","end","filters","group_by":["campaign","channel"] }` → returns attribution split and per-campaign ROI metrics.
+
+* `POST /v1/order-analytics/attribution/compare`
+  Compare attribution methods for same data.
+
+---
+
+# 7 — Returns, refunds & fraud analytics
+
+Specialized endpoints for returns and refund impact analysis; fraud trend detection.
+
+* `POST /v1/order-analytics/returns/summary`
+  Returns top SKUs by return rate, return reasons distribution, avg return processing time.
+
+* `POST /v1/order-analytics/refunds/impact`
+  Show net revenue after refunds, refund drivers by channel/sku.
+
+* `POST /v1/order-analytics/fraud/trends`
+  Time-series of fraud flags, chargeback rate, suspicious IP clusters; supports anomaly detection model options.
+
+---
+
+# 8 — Anomaly detection & alerts
+
+Detect sudden drops/spikes and alert operations teams.
+
+* `POST /v1/order-analytics/anomalies/register`
+  Create anomaly rule: `{ "metric":"orders_count","group_by":["country"], "sensitivity":0.95, "window":"1h", "method":"seasonal_esd|zscore|prophet" }` → `201`.
+
+* `GET /v1/order-analytics/anomalies/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/order-analytics/anomalies/scan`
+  Run scan for time-range (sync) or schedule it (async) and return detected anomalies with scores and suggested root-cause dimensions.
+
+* `GET /v1/order-analytics/anomalies/history`
+  List past anomalies with resolution status.
+
+* `POST /v1/order-analytics/alerts`
+  Create alert rules that notify via channels (email/webhook/slack) on anomaly or threshold triggers.
+
+---
+
+# 9 — Dashboards, saved queries & widgets
+
+UI primitives for dashboards and re-usable saved queries/widgets.
+
+* `GET /v1/order-analytics/dashboards`
+  List dashboards.
+
+* `POST /v1/order-analytics/dashboards`
+  Create dashboard JSON `{ name, widgets:[{type:"timeseries", queryId, layout}], sharing }`.
+
+* `GET /v1/order-analytics/dashboards/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/order-analytics/widgets/preview`
+  Return widget rendering data for a query/preset (useful for client preview).
+
+* `POST /v1/order-analytics/queries`
+  Save a reusable query (DSL) — `201` with `query_id`.
+
+* `POST /v1/order-analytics/queries/{queryId}/run`
+  Run saved query with overrides (start/end, filters).
+
+---
+
+# 10 — Scheduled reports & exports
+
+Schedule periodic exports and one-off exports to S3/BI.
+
+* `POST /v1/order-analytics/reports/schedule`
+  Create scheduled report: `{ "name","query_id","schedule":"cron","format":"csv|parquet|xlsx","destination":{"s3":"s3://...","email":"ops@..."} }` → `201`.
+
+* `GET /v1/order-analytics/reports/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/order-analytics/exports`
+  Run ad-hoc export: `{ "query":{...}, "format":"parquet","destination":"s3://...", "compression":true }` → `202` with `job_id`.
+
+* `GET /v1/order-analytics/exports/{jobId}` — status + download link.
+
+---
+
+# 11 — Jobs, backfills & rollups
+
+Manage heavy async work: backfills, rollups, re-aggregation.
+
+* `POST /v1/order-analytics/jobs/backfill`
+  Backfill aggregates from `start` to `end` for selected metrics/dimensions. Returns `job_id`.
+
+* `POST /v1/order-analytics/jobs/rollup`
+  Trigger on-demand rollup (e.g., hourly → daily) for particular groups.
+
+* `GET /v1/order-analytics/jobs/{jobId}` — status and error report.
+
+* `GET /v1/order-analytics/jobs` — list recent jobs.
+
+---
+
+# 12 — ML models, forecasting & what-if
+
+Forecasting and model management for demand forecasting, LTV prediction, and scenario simulations.
+
+* `POST /v1/order-analytics/models/train`
+  Start a training job for a model type: `{ "type":"demand_forecast|ltv|churn", "dataset":{...},"params":{...} }` → `job_id`.
+
+* `GET /v1/order-analytics/models/{modelId}` — model metadata, performance metrics.
+
+* `POST /v1/order-analytics/models/{modelId}/predict`
+  Run prediction request (returns forecast, confidence intervals).
+
+* `POST /v1/order-analytics/whatif`
+  Scenario simulation: `{ "scenario":"increase_price_5pct","affected_skus":["..."], "horizon":"30d" }` → returns forecasted revenue change & confidence.
+
+---
+
+# 13 — Attribution & marketing ROI
+
+Integrations for marketing analytics: campaign ROI, CAC, ROAS.
+
+* `POST /v1/order-analytics/marketing/roi`
+  Input campaign spend/time-range & map to attribution query; returns ROI, CAC, ROAS.
+
+* `POST /v1/order-analytics/marketing/multi-touch`
+  Multi-touch campaign analysis with spend breakdown.
+
+---
+
+# 14 — Permissions, keys & tenancy
+
+Manage access to analytics features and API keys.
+
+* `GET /v1/order-analytics/keys` / `POST /v1/order-analytics/keys` — create API keys (read/query vs admin). Keys returned plaintext once.
+
+* `GET /v1/order-analytics/roles` / `POST /v1/order-analytics/roles` — view/manage analytic roles (viewer, analyst, admin).
+
+* `GET /v1/order-analytics/permissions/me` — effective permissions for caller.
+
+---
+
+# 15 — Webhooks & alerts integrations
+
+Notify external systems (PagerDuty, Slack, BI) when anomalies or scheduled reports are ready.
+
+* `GET /v1/order-analytics/webhooks`
+
+* `POST /v1/order-analytics/webhooks` `{ "url","events":["anomaly.detected","report.completed","export.failed"], "secret" }` → `201`.
+
+* `DELETE /v1/order-analytics/webhooks/{id}`
+
+* `POST /v1/order-analytics/webhooks/test`
+
+---
+
+# 16 — Debug, health & metrics
+
+SRE endpoints to monitor ingestion and query health.
+
+* `GET /v1/order-analytics/health` — subsystems (ingest pipeline, rollup workers, query engine, ML worker).
+
+* `GET /v1/order-analytics/metrics` — internal service metrics (ingest QPS, lag, query latency p50/p95/p99, rollup failures).
+
+* `GET /v1/order-analytics/diagnostics` — current ingest lag by connector, hot cardinalities, last processed watermark.
+
+---
+
+# 17 — Example query payloads & responses
+
+KPI timeseries query (request):
+
+```json
+POST /v1/order-analytics/kpis/query
+{
+  "metrics":["orders_count","revenue_gross"],
+  "start":"2025-08-01T00:00:00Z",
+  "end":"2025-08-31T23:59:59Z",
+  "granularity":"1d",
+  "group_by":["country"],
+  "filters": { "channel":["web","mobile"] },
+  "aggregation":"sum"
+}
+```
+
+Response (abridged):
+
+```json
+{
+  "query_id":"q_123",
+  "groups":[
+    {
+      "key":{"country":"GB"},
+      "buckets":[
+        {"time":"2025-08-01T00:00:00Z","orders_count":120,"revenue_gross":3450000},
+        {"time":"2025-08-02T00:00:00Z","orders_count":132,"revenue_gross":3520000}
+      ]
+    }
+  ],
+  "calculated_at":"2025-09-01T02:00:00Z"
+}
+```
+
+Funnel query response:
+
+```json
+{
+  "funnel_id":"f_1",
+  "steps":[
+    {"name":"visit","count":10000},
+    {"name":"add_to_cart","count":2200,"conversion_from_prev":22.0},
+    {"name":"checkout_initiated","count":900,"conversion_from_prev":40.9},
+    {"name":"payment_succeeded","count":700,"conversion_from_prev":77.8}
+  ],
+  "dropoffs":[{"from":"visit","to":"add_to_cart","count":7800}],
+  "time_to_convert_histogram": { "p50": 3600, "p90": 7200 }
+}
+```
+
+---
+
+# 18 — Design notes & best practices (short)
+
+* **Single source vs derived store:** Keep analytics as a read-optimized derived store. Ingest from canonical event streams (order, payment, fulfillment). Maintain watermarks & idempotency to avoid double-counting.
+* **Tiered storage & rollups:** Keep raw events (hot short-term) + detailed hourly/daily rollups + long-term aggregates. Use rollups to serve low-latency dashboards. Keep retention/archival policies configurable.
+* **Cardinality awareness:** Monitor and cap cardinality explosion (sku × campaign × customer\_segment). Provide warnings and cardinality controls (pre-aggregate or sampling).
+* **Freshness SLAs:** Expose freshness/latency metadata per query; allow `max_staleness` and `force_fresh` options for critical flows.
+* **Deterministic aggregates:** Use event deduplication (event\_id) and monotonic watermarks. Recompute / backfill endpoints must be available for corrections.
+* **Security & PII:** Mask PII in analytics where not needed; provide secure export controls and audit logs for data access. Support GDPR erasure by excluding or pseudonymizing datasets while preserving aggregates where possible.
+* **Explainability:** For ML/forecast/what-if produce clear assumptions and CI/confidence intervals. Provide provenance (which events and models produced the numbers).
+* **Observability & SLOs:** instrument ingestion lag, query latency, model training times and alert when backfills are required or connector lag grows.
+* **Integration-first:** provide connectors to BI tools (Looker/Metabase/Tableau), data lakes (S3/BigQuery), streaming sinks (Kafka), and alerts (PagerDuty/Slack).
+* **Test & dry-run:** allow `dry_run=true` for heavy queries/exports so analysts can validate without costing runs.
+* **Access controls:** separate reader vs analyst vs admin roles; restrict exports and model training ops to privileged roles.
+
+---
+
+If you’d like I can next (pick one):
+
+* generate an **OpenAPI (Swagger) skeleton** for the core endpoints (`/ingest`, `/kpis/query`, `/funnels/query`, `/cohorts/retention`, `/exports`),
+* design the **time-series & aggregation schema** (suggested DDL for ClickHouse/TimescaleDB and rollup tables),
+* or produce a **sample analytics client** (Node or Python) that shows safe ingestion, example KPI query and exporting results to S3.
+
+Which one should I produce now?

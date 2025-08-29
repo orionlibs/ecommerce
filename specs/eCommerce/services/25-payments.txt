@@ -1,0 +1,435 @@
+# Payment Service — REST API surface
+
+Nice — below is a comprehensive, focused REST API design for a **Payment Service** that acts as the payment orchestration & vault layer for an eCommerce platform. It owns payment lifecycle orchestration (payment intents, authorizations, captures, refunds, chargebacks/disputes), tokenization/vaulting of payment instruments (PCI vault), connectors to external gateways and acquirers, payouts/settlements, reconciliation, reporting, webhooks, and admin configuration.
+I include **only** endpoints relevant to payments (no orders, invoices, inventory, pricing, cart, etc.) — those are referenced by id (`order_id`, `invoice_id`) when needed.
+
+## Conventions (applies everywhere)
+
+* Base path: `https://api.example.com/v1/payments`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header, or tenant-scoped path `/v1/{tenantId}/payments`.
+* Content-Type: `application/json`. File uploads (certs, settlement files) via presigned URLs.
+* Idempotency: mutating endpoints **must** accept `Idempotency-Key` header for safe retries.
+* Concurrency: use `If-Match`/`ETag` or `version` in resource bodies for optimistic concurrency.
+* Pagination: `cursor` + `limit` (or `page`/`limit`).
+* Money: always store amounts as integer minor units + `currency` (ISO-4217).
+* Responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`.
+* Sensitive data: raw PAN must never be returned. Vault returns token ids and network last4, brand, expiry\_month/year. Follow PCI scope guidance; payment service integrates with a PCI vault or a tokenization provider.
+
+---
+
+# 1. Payment methods & vault
+
+Store and manage customer payment instruments (cards, bank accounts, APM tokens, wallets). Only token/metadata stored — no PAN.
+
+* `POST /v1/payments/methods`
+  Create / tokenize payment method (server-side tokenization). Body example:
+
+  ```json
+  {
+    "type":"card|bank_account|apple_pay|google_pay|paypal|sepa_debit",
+    "customer_id":"cust_123",
+    "token":"tok_abc_from_gateway_or_client",
+    "metadata":{ "nickname":"Personal Visa" }
+  }
+  ```
+
+  Response: `201` `{ "payment_method_id":"pm_abc", "type":"card", "brand":"VISA","last4":"4242","exp_month":12,"exp_year":2027 }`
+
+* `POST /v1/payments/methods/attach`
+  Attach existing tokenized method to customer / merchant relationship.
+
+* `GET /v1/payments/methods/{paymentMethodId}`
+  Retrieve method metadata (no PAN).
+
+* `GET /v1/payments/methods?customer_id=cust_123`
+  List saved methods for a customer.
+
+* `PATCH /v1/payments/methods/{paymentMethodId}`
+  Update nickname, metadata, default flags.
+
+* `DELETE /v1/payments/methods/{paymentMethodId}`
+  Delete / revoke method (soft delete; create audit).
+
+* `POST /v1/payments/methods/verify`
+  Verify a payment method (micro-deposit or verification call for bank accounts, 3DS enrollment check for cards).
+
+Notes: support both client-side tokenization (client returns token) and server-side tokenization with `payment_method.token`. For vaulting of customer card-on-file, require explicit consent flags.
+
+---
+
+# 2. Payment intents / authorizations / captures (core runtime)
+
+A Payment Intent is the canonical object representing attempt to pay an amount. It handles authorization, SCA/3DS flows, capture, cancellation, and status transitions.
+
+* `POST /v1/payments/intents`
+  Create payment intent. Body example:
+
+  ```json
+  {
+    "request_id":"req-abc",           // optional client idempotency
+    "amount": 5194,
+    "currency":"GBP",
+    "customer_id":"cust_1",
+    "payment_method_id":"pm_abc",     // optional: attach now or later
+    "capture_mode":"auto|manual",
+    "description":"Order ord_123",
+    "metadata": { "order_id":"ord_123","invoice_id":"inv_456" },
+    "payment_method_options": { "card":{"capture_method":"automatic"} },
+    "merchant_account_id":"ma_1"
+  }
+  ```
+
+  Response: `201` PaymentIntent object with `id`, `status` (`requires_payment_method|requires_confirmation|requires_action|processing|authorized|succeeded|requires_capture|canceled|failed`), and `next_action` instructions if needed (3DS redirect/embedded challenge/redirect\_to\_url).
+
+* `GET /v1/payments/intents/{intentId}`
+
+* `PATCH /v1/payments/intents/{intentId}`
+  Update metadata, amount adjustments (allowed before certain statuses), or change capture\_mode (if allowed).
+
+* `POST /v1/payments/intents/{intentId}/attach-method`
+  Attach a payment\_method (token) to intent.
+
+* `POST /v1/payments/intents/{intentId}/confirm`
+  Confirm intent: triggers authorization request to gateway; may return `requires_action` (SCA).
+
+* `POST /v1/payments/intents/{intentId}/3ds/complete`
+  Endpoint to submit 3DS/ACS results (if external callback flow needed).
+
+* `POST /v1/payments/intents/{intentId}/capture`
+  Capture an authorized amount (useful for `capture_mode=manual`). Body: `{ "amount": optional_partial_amount }`. Response: capture record.
+
+* `POST /v1/payments/intents/{intentId}/cancel`
+  Cancel the intent (releases pre-auth if possible). Body: `{"reason":"user_cancel|timeout|fraud"}`.
+
+* `GET /v1/payments/intents/{intentId}/charges`
+  List associated charge/authorization/capture records.
+
+* `POST /v1/payments/intents/bulk` — bulk create intents (async job).
+
+Design notes: PaymentIntent is the single source for lifecycle. Always return `next_action` with clear client instructions and `client_secret` only to the client that needs it (short TTL). Use `Idempotency-Key` to avoid double-authorizations.
+
+---
+
+# 3. Authorizations & charges (lower-level records)
+
+Records of individual authorizations and capture operations.
+
+* `GET /v1/payments/authorizations/{authId}` — get authorization details (amount authorized, expiry, gateway reference).
+* `POST /v1/payments/authorizations/{authId}/capture` — capture specific authorization.
+* `POST /v1/payments/authorizations/{authId}/void` — void pre-auth.
+* `GET /v1/payments/charges/{chargeId}` — charge/transaction detail (gateway id, card network response code, reconciliation reference).
+* `GET /v1/payments/intents/{intentId}/transactions` — list all related transaction events (auths, captures, refunds, reversals).
+
+Transaction records must store `gateway_reference`, `acquirer`, `response_code`, `avs/cvv_result`, `3ds_result`, `risk_score`, `settlement_date` when available.
+
+---
+
+# 4. Refunds / reversals / adjustments
+
+Create refunds against captured charges. Record refund lifecycle and possible disputes.
+
+* `POST /v1/payments/refunds`
+  Create refund. Body:
+
+  ```json
+  {
+    "payment_intent_id":"pi_abc",
+    "charge_id":"ch_1",
+    "amount": 5194,
+    "reason":"customer_request|product_return|fraud|other",
+    "refund_method":"original_payment_method|store_credit",
+    "metadata": { "order_id":"ord_123" }
+  }
+  ```
+
+  Response: `201` refund object with `status` (`pending|processing|succeeded|failed|requires_action`), `refund_id`, `gateway_reference`.
+
+* `GET /v1/payments/refunds/{refundId}`
+
+* `POST /v1/payments/refunds/{refundId}/cancel` — attempt to cancel if still pending (best-effort).
+
+* `GET /v1/payments/intents/{intentId}/refunds` — list refunds for an intent.
+
+* `POST /v1/payments/refunds/bulk` — async bulk refunds job.
+
+Notes: refunds that fail may require manual reconciliation; provide `failure_reason` and `actions`.
+
+---
+
+# 5. Chargebacks / disputes
+
+Record incoming disputes from acquirers and track their lifecycle.
+
+* `POST /v1/payments/disputes`
+  (Usually created by webhook from gateway) Create dispute record: `{ "charge_id":"ch_1","amount": 5194, "reason_code":"fraud|product_not_received", "received_at":"..." }` → `201`.
+
+* `GET /v1/payments/disputes/{disputeId}`
+
+* `POST /v1/payments/disputes/{disputeId}/submit-evidence`
+  Upload evidence or presigned URL(s) with supporting docs (receipt, shipping proof, communications). Body: `{ "evidence":[{"type":"pdf","url":"..."}], "notes":"..." }` → returns submission status.
+
+* `GET /v1/payments/disputes/{disputeId}/evidence`
+  List evidence items.
+
+* `POST /v1/payments/disputes/{disputeId}/close` — close dispute after resolution (e.g., merchant accepts chargeback) — creates accounting note.
+
+* `GET /v1/payments/disputes` — list disputes; filter by status, date\_range, merchant\_account.
+
+Design note: gateways send dispute webhooks; keep immutable audit of events and evidence submissions. Connect with Billing/Orders to create corresponding credit notes or adjustments.
+
+---
+
+# 6. Payment connectors & gateway management
+
+Register and configure gateway connectors, swap acquirers, fail-over routes, routing rules and credential management.
+
+* `GET /v1/payments/connectors`
+  List connectors (Stripe, Adyen, Worldpay, local PSPs) and status.
+
+* `POST /v1/payments/connectors`
+  Create connector: `{ "name":"adyyen-eu","type":"adyen","config":{ "api_key":"***","merchant_account":"MA_123" }, "priority":10, "region":"EU" }` → `201`
+
+* `GET /v1/payments/connectors/{connectorId}` / `PATCH` / `DELETE`
+
+* `POST /v1/payments/connectors/{connectorId}/test` — test credentials and connectivity.
+
+* `POST /v1/payments/routing-rules`
+  Create routing rule to send payments by currency/country/card\_brand to specific connector. Example rule: `{ "match":{"currency":"EUR","country":"FR"},"connector_id":"con_1","priority":100 }`.
+
+* `GET /v1/payments/routing-rules` / `PATCH` / `DELETE`
+
+* `POST /v1/payments/connectors/{connectorId}/run-settlement` — trigger manual settlement sync.
+
+Notes: Connector configs stored encrypted (secrets access controlled), and rotation endpoints must be available.
+
+---
+
+# 7. Settlements, payouts & reconciliations
+
+Handle settlement files, payouts to merchants, merchant accounts, and reconciliation reporting.
+
+* `GET /v1/payments/settlements`
+  List settlement batches (date range, connector, status).
+
+* `POST /v1/payments/settlements/sync`
+  Pull settlement files from connector/acquirer (async job). Returns `job_id`.
+
+* `GET /v1/payments/settlements/{settlementId}` — details and included transactions.
+
+* `POST /v1/payments/payouts`
+  Initiate payout to merchant/bank account: `{ "merchant_account_id":"ma_1","amount":100000,"currency":"GBP","destination":"bank_account_123","metadata":{...} }` → returns `payout_id` and status (`pending|processing|paid|failed`).
+
+* `GET /v1/payments/payouts/{payoutId}`
+
+* `POST /v1/payments/reconciliations`
+  Trigger reconciliation run between captured transactions and settlement records (async). `POST /v1/payments/reconciliations/{jobId}/resolve` for manual actions.
+
+* `GET /v1/payments/reconciliations/{jobId}` — report of matched/unmatched.
+
+Design note: support mapping to general ledger account codes and export compatible files (CSV/QBO/Xero) for finance.
+
+---
+
+# 8. Webhooks & external callbacks
+
+Receive gateway webhooks and emit events to platform services.
+
+* `GET /v1/payments/webhooks`
+
+* `POST /v1/payments/webhooks` `{ "url":"https://...","events":["payment.succeeded","payment.failed","refund.succeeded","dispute.created"], "secret":"..." }` → `201`.
+
+* `DELETE /v1/payments/webhooks/{id}` / `POST /v1/payments/webhooks/test`.
+
+* `POST /v1/payments/webhook/gateway`
+  Public webhook endpoint for gateway callbacks (signed). Handler validates signature and maps to internal intent/charge/refund/dispute (idempotent).
+
+Important: webhook payloads must be verifiable (HMAC, certificates) and the handler must be idempotent because gateways retry.
+
+---
+
+# 9. 3DS / SCA / Challenges & APM flows
+
+Support SCA 3DS flows and alternative payment method redirect flows.
+
+* `GET /v1/payments/payment-methods/3ds/lookup?payment_method_id=...`
+  Check 3DS enrollment / device fingerprint needs.
+
+* `POST /v1/payments/intents/{intentId}/3ds/start`
+  Start 3DS flow and return `acs_url` or `challenge` parameters.
+
+* `POST /v1/payments/intents/{intentId}/3ds/complete` — submit results.
+
+* `GET /v1/payments/intents/{intentId}/next-action` — client polls for next action (redirect/qr/awaiting-webhook).
+
+* `POST /v1/payments/apm/{apmId}/initiate` — initiate redirect flows (PayPal, iDEAL, Klarna sessions). Returns redirect URL or qr payload.
+
+* `POST /v1/payments/apm/{apmId}/confirm` — confirm APM after return webhook.
+
+---
+
+# 10. Fraud & risk integration
+
+Expose scoring and decisioning integration points, and attach risk results to transaction records.
+
+* `POST /v1/payments/fraud/score`
+  Submit transaction context for scoring: `{ "intent_id","ip","device_fingerprint","billing_address","shipping_address","customer_id" }` → returns `{ score, action: allow|challenge|deny, reasons }`.
+
+* `GET /v1/payments/fraud/rules` — list configured risk rules.
+
+* `POST /v1/payments/fraud/override` — admin override to force allow/deny (audit required).
+
+* `GET /v1/payments/fraud/decisions/{decisionId}` — lookup.
+
+Notes: Score results must be stored with payment intent and be available in audit.
+
+---
+
+# 11. Testing, sandbox & developer utilities
+
+Support simulated gateways and test cards in non-prod.
+
+* `GET /v1/payments/test/cards` — list test card numbers & behavior patterns (e.g., decline, challenge, succeed).
+* `POST /v1/payments/test/simulate` — simulate gateway event (for dev/test only): `{ "type":"payment.succeeded","intent_id":"pi_test","delay_ms":1000 }`.
+* `POST /v1/payments/test/faucet` — issue test tokens in sandbox.
+
+Important: test endpoints disabled in production.
+
+---
+
+# 12. Keys, roles, access & PCI tooling
+
+Manage publishable vs secret keys, roles, scopes.
+
+* `GET /v1/payments/keys`
+
+* `POST /v1/payments/keys` `{ "name":"storefront-read","scopes":["intents:read","methods:attach"], "expires_in":"30d" }` → returns plaintext key once.
+
+* `DELETE /v1/payments/keys/{keyId}`
+
+* `GET /v1/payments/roles` / `POST /v1/payments/roles` — role management (payments\_admin, reconciler, read\_only).
+
+* `GET /v1/payments/pci/attestation` — retrieve PCI attestation & audit meta for this tenant (for finance/compliance teams).
+
+---
+
+# 13. Metrics, reporting & exports
+
+Transaction-level and aggregate reports; export formats for finance.
+
+* `GET /v1/payments/metrics`
+  KPIs: `payments_count`, `success_rate`, `decline_rate`, `chargeback_rate`, `avg_settlement_delay` (accept `from`/`to`, `group_by`).
+
+* `POST /v1/payments/exports`
+  Export transaction / settlement / chargeback data to S3/CSV/Parquet. Body: `{ "query":{...},"destination":"s3://...","format":"parquet" }` → `202` job id.
+
+* `GET /v1/payments/exports/{jobId}` — status + download.
+
+* `GET /v1/payments/reports/settlement/{date}` — daily settlement report.
+
+---
+
+# 14. Admin / connectors / config / tenant settings
+
+Tenant-level settings for allowed payment methods, default capture mode, risk thresholds and limits.
+
+* `GET /v1/payments/settings` — returns `{ allowed_methods, default_capture_mode, max_authorization_amount, three_ds_policy, dispute_retention_days }`.
+
+* `PATCH /v1/payments/settings` — update tenant settings.
+
+* `GET /v1/payments/connectors/{id}/logs` — connector logs.
+
+* `POST /v1/payments/maintenance/retry-failed-webhooks` — admin-triggered.
+
+---
+
+# 15. Health, diagnostics & audit
+
+SRE and audit endpoints.
+
+* `GET /v1/payments/health` — subsystems: gateway connectivity, vault, job queue, webhook delivery, reconciliation worker.
+
+* `GET /v1/payments/diagnostics` — inflight intents, failed attempts, gateway latencies, queued refunds.
+
+* `GET /v1/payments/audit` — admin query of changes (who changed connector creds, created keys, manual overrides).
+
+---
+
+# 16. Example canonical resources
+
+PaymentIntent (abridged):
+
+```json
+{
+  "id":"pi_0001",
+  "status":"requires_confirmation",
+  "amount":5194,
+  "currency":"GBP",
+  "customer_id":"cust_123",
+  "payment_method_id":null,
+  "capture_mode":"auto",
+  "metadata":{"order_id":"ord_123"},
+  "created_at":"2025-08-29T12:00:00Z",
+  "updated_at":"2025-08-29T12:00:05Z",
+  "next_action": {
+    "type":"redirect_to_url",
+    "url":"https://gateway/checkout/..."
+  }
+}
+```
+
+PaymentMethod (abridged):
+
+```json
+{
+  "id":"pm_001",
+  "type":"card",
+  "brand":"VISA",
+  "last4":"4242",
+  "exp_month":12,
+  "exp_year":2027,
+  "customer_id":"cust_123",
+  "vault_provider":"our_vault",
+  "created_at":"2025-08-29T11:00:00Z"
+}
+```
+
+Refund:
+
+```json
+{
+  "id":"rf_100",
+  "status":"processing",
+  "amount":5194,
+  "currency":"GBP",
+  "payment_intent_id":"pi_0001",
+  "charge_id":"ch_001",
+  "gateway_reference":"gw_rf_9001",
+  "created_at":"2025-08-30T09:00:00Z",
+  "failure_reason":null
+}
+```
+
+---
+
+# 17. Design notes & best practices (brief)
+
+* **Intent-based model:** use `PaymentIntent` as single source for lifecycle (create → confirm → authorize → capture → refund). This simplifies SCA flows and client UX.
+* **Idempotency & safe-retry:** require `Idempotency-Key` for create/confirm/capture/refund endpoints — gateways may retry, ensure dedupe.
+* **Tokenization & PCI scope:** never store raw PAN in app DB; use a PCI-compliant vault or gateway tokens. Provide one-time client tokens (client\_secret) with short TTL for browser flows.
+* **3DS / SCA:** return `next_action` in PaymentIntent; keep SDK-friendly flows (redirect, challenge) and a server webhook-based fallback for asynchronous confirmations.
+* **Routing & fallback:** support routing rules and connector priority for high availability and local acquiring (e.g., card brand/country-specific acquirers). Implement fail-over and smart retries.
+* **Reconciliation-first:** store gateway references, settlement dates, and reconcile with settlement files. Provide reconciliation reports and manual resolve flows.
+* **Disputes & evidence:** preserve immutable audit of evidence submissions for disputes and integrate with Billing/Orders to generate credit notes automatically.
+* **Observability:** metrics: auth latency, decline reasons, success rate by connector, 3DS challenge rate, settlement lag, refund failure rate, dispute win rate.
+* **Security & governance:** rotate connector credentials, restrict key creation, log admin overrides and impersonation, expose PCI attestation info.
+* **Testing & sandbox separation:** provide robust sandbox + test connectors and card behaviors to QA flows; disable test endpoints in prod.
+
+---
+
+If you want, I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the core endpoints (`/intents`, `/methods`, `/refunds`, `/connectors`, `/webhook/gateway`),
+* produce detailed **JSON schemas** for `PaymentIntent` / `PaymentMethod` / `Refund` (with idempotency examples),
+* or design a **race-free authorize → capture → refund** state machine (pseudocode + DB schema + retries/compensation) for high-concurrency platforms.
+
+Which would you like me to produce now?

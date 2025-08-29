@@ -1,0 +1,458 @@
+# Order Fulfillment Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for an **Order Fulfillment Service**. It contains **only** endpoints relevant to fulfillment: receiving orders to fulfill, allocation/lot/serial handling hooks, pick/pack/ship workflow, shipment creation & labels, carrier/3PL connectors, returns intake & disposition, warehouse/slotting operations, manifests/ASNs, task/worker orchestration, tracking updates, batch jobs, webhooks and operational metrics. I **do not** include order creation, pricing, payments, inventory stock mutation, or courier billing internals — those belong to other services and are referenced by `order_id`, `line_id`, `reservation_id`, etc.
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/fulfillment`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths (`/v1/{tenantId}/fulfillment`).
+* Content type: `application/json`. File transfers (labels, manifests) via presigned URLs.
+* Pagination: cursor-style `cursor` + `limit`.
+* Common headers: `Idempotency-Key` for mutating calls; optimistic concurrency via `If-Match` / ETag or `version`.
+* Money: not needed here (carrier fees come from Shipping/Payments).
+* Standard responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+* Time format: RFC3339 / ISO8601.
+* Important principle: Fulfillment orchestrates physical flows and creates fulfillment/shipment records; actual stock quantities & allocations are authoritative in Inventory Service — Fulfillment will call Inventory APIs for allocations or be notified of allocation events.
+
+---
+
+# 1 — Fulfillment units / requests
+
+Create and manage fulfillment jobs for orders (one order may generate multiple fulfillment units for split shipments).
+
+* `POST /v1/fulfillment/fulfillments`
+  Create fulfillment request(s) for order lines. Body example:
+
+  ```json
+  {
+    "order_id":"ord_123",
+    "source":"order_service",
+    "requested_ship_date":"2025-09-01T09:00:00Z",
+    "warehouse_id":"wh_london",
+    "lines":[
+      { "order_line_id":"line_1","sku":"SKU-1","quantity":2, "attributes":{} },
+      { "order_line_id":"line_2","sku":"SKU-2","quantity":1 }
+    ],
+    "metadata":{}
+  }
+  ```
+
+  Response: `201` with `fulfillment_id` and status `created|awaiting_allocation|allocated|picking|packing|ready_to_ship`.
+
+* `GET /v1/fulfillment/fulfillments/{fulfillmentId}` — retrieve full fulfillment with lines, allocations, shipments, tasks, timeline.
+
+* `GET /v1/fulfillment/fulfillments?order_id=...&status=...` — list/filter.
+
+* `PATCH /v1/fulfillment/fulfillments/{fulfillmentId}` — update (change warehouse, requested date) when allowed.
+
+* `POST /v1/fulfillment/fulfillments/{fulfillmentId}/cancel` — cancel fulfillment (if not shipped); triggers release of inventory reservations via Inventory Service (or emits `fulfillment.cancelled` event).
+
+* `GET /v1/fulfillment/fulfillments/{fulfillmentId}/timeline` — event timeline for operational audit.
+
+---
+
+# 2 — Allocation & reservation handoffs (integration with Inventory)
+
+Fulfillment requests allocation; Fulfillment should call Inventory Service or receive allocation webhooks.
+
+* `POST /v1/fulfillment/allocations/request`
+  Ask Inventory Service to allocate for a fulfillment. Body: `{ "fulfillment_id":"...","lines":[{line_id,sku,qty}], "strategy":"nearest_warehouse|fifo|lot_expiry" }` → returns `allocation_id` and provisional per-line allocation summary.
+
+* `GET /v1/fulfillment/allocations/{allocationId}` — allocation status (`pending|allocated|partial|failed`) and per-line allocated locations/lot/serial.
+
+* `POST /v1/fulfillment/allocations/{allocationId}/confirm-pick`
+  Confirm inventory pick from allocated location(s) (used after pick) — idempotent.
+
+* `POST /v1/fulfillment/allocations/{allocationId}/release` — release allocation (on cancel).
+
+* `POST /v1/fulfillment/allocations/bulk` — bulk allocation requests for many fulfillments (async job id).
+
+> Note: Inventory Service remains the source of truth for stock; Fulfillment only requests allocations and acts on allocation responses (never mutates SKU counts).
+
+---
+
+# 3 — Pick & pack workflows (warehouse orchestration)
+
+APIs to generate pick lists, assign tasks to pickers, confirm picks, manage pack stations.
+
+* `POST /v1/fulfillment/picklists`
+  Create a picklist (wave) for one or many fulfillments. Body: `{ "warehouse_id":"wh_1","fulfillment_ids":["ful_1","ful_2"], "priority":"high","picker_group":"zoneA" }` → returns `picklist_id` and pick instructions.
+
+* `GET /v1/fulfillment/picklists/{picklistId}` — picklist details and line items grouped by pick location.
+
+* `POST /v1/fulfillment/picklists/{picklistId}/assign`
+  Assign to worker or handheld device: `{ "worker_id":"u_234", "device_id":"scanner_12" }`.
+
+* `POST /v1/fulfillment/picklists/{picklistId}/start` — mark started.
+
+* `POST /v1/fulfillment/picklists/{picklistId}/scan`
+  Streaming scan endpoint for handhelds to submit picks (accepts array of `{ location_id, sku, lot, serial, qty, timestamp }`). Returns per-scan validation (wrong location, qty shortage).
+
+* `POST /v1/fulfillment/picklists/{picklistId}/complete` — mark completed, produce picked-quantities and `pick_confirmation_id`.
+
+* `GET /v1/fulfillment/picklists/{picklistId}/tasks` — list task-level items per picker.
+
+* `POST /v1/fulfillment/picklists/{picklistId}/rebin` — re-bin action if returns to staging.
+
+* `POST /v1/fulfillment/picklists/{picklistId}/adjust` — reconcile short/over picks (creates adjustments and may create backorder / notify Inventory Service).
+
+Pack station APIs:
+
+* `POST /v1/fulfillment/pack-stations/{stationId}/open-session` — open pack session for a worker.
+
+* `POST /v1/fulfillment/pack-stations/{stationId}/pack` — submit packing event: `{ "fulfillment_ids":[...], "packages":[ { "weight":..., "dims":..., "items":[{line_id,qty,serials}] } ] }` → returns `package_id(s)` and `ready_to_ship` status.
+
+* `POST /v1/fulfillment/pack-stations/{stationId}/seal` — seal package (finalize package content, create label placeholder).
+
+---
+
+# 4 — Shipments, carrier selection & label generation
+
+Create shipments, interact with carrier connectors, generate labels, schedule pickups.
+
+* `POST /v1/fulfillment/shipments`
+  Create shipment for one or multiple packages. Body:
+
+  ```json
+  {
+    "fulfillment_id":"ful_1",
+    "packages":[ { "package_id":"pkg_1","weight":1200,"dimensions":{"l":30,"w":20,"h":10} } ],
+    "from_warehouse_id":"wh_1",
+    "to_address":{ /* shipping address */ },
+    "carrier_hint":"DHL|UPS",
+    "service_code":"express",
+    "insurance": {"value": 20000, "currency":"GBP"},
+    "reference":"order_shipment_123",
+    "metadata": {}
+  }
+  ```
+
+  Response: `201` with `shipment_id`, status `label_pending|label_generated|booked|in_transit`.
+
+* `GET /v1/fulfillment/shipments/{shipmentId}` — shipment details and tracking.
+
+* `POST /v1/fulfillment/shipments/{shipmentId}/generate-label`
+  Request label generation. Body may include `connector_id` or `label_format` (`pdf|zpl|png`). Returns presigned `label_url` and `carrier_tracking_number`.
+
+* `GET /v1/fulfillment/shipments/{shipmentId}/label` — retrieve label presigned URL.
+
+* `POST /v1/fulfillment/shipments/{shipmentId}/schedule-pickup` — schedule carrier pickup by date/time.
+
+* `POST /v1/fulfillment/shipments/{shipmentId}/cancel` — cancel shipment (if allowed by carrier).
+
+* `POST /v1/fulfillment/shipments/{shipmentId}/book` — explicitly book shipment with carrier (returns manifest\_id).
+
+* `POST /v1/fulfillment/shipments/{shipmentId}/track` — register external tracking webhook subscription or poll carrier.
+
+* `GET /v1/fulfillment/shipments?warehouse_id=...&status=...` — list shipments for ops.
+
+* `POST /v1/fulfillment/shipments/bulk-generate-labels` — generate labels for batch (async job id).
+
+Notes: carrier connectors and routing rules are managed in a separate Shipping/Carrier Connector service — Fulfillment uses connector ids and handles local packaging/manifesting.
+
+---
+
+# 5 — Manifests, ASN & dispatch
+
+Create manifests for carriers or 3PL and send ASNs to trading partners.
+
+* `POST /v1/fulfillment/manifests`
+  Create manifest for batch shipments: `{ "warehouse_id","shipments":[shipment_id,...], "carrier_id","dispatch_date" }` → returns `manifest_id` and `manifest_file_url` (presigned).
+
+* `GET /v1/fulfillment/manifests/{manifestId}` — manifest details and status (`draft|submitted|accepted|rejected`).
+
+* `POST /v1/fulfillment/asn`
+  Create Advance Shipping Notice (ASN) to supplier / 3PL (for outbound DC to DC transfers): `{ "asn_reference","shipments":[...], "expected_arrival":"..." }`.
+
+* `POST /v1/fulfillment/manifests/{manifestId}/submit` — submit to carrier or 3PL connector.
+
+---
+
+# 6 — Returns intake, RMA & reverse logistics
+
+Fulfillment handles physical receiving and disposition of returned goods.
+
+* `POST /v1/fulfillment/returns`
+  Create RMA / return intake (can be generated by Returns Service). Body:
+
+  ```json
+  {
+    "order_id":"ord_123",
+    "rma_reference":"rma_001",
+    "reason":"damaged|customer_remorse|wrong_item",
+    "expected_lines":[{ "order_line_id":"l1","qty":1 }],
+    "return_method":"ship|dropoff|pickup",
+    "destination_warehouse_id":"wh_returns_london",
+    "metadata":{}
+  }
+  ```
+
+  Response: `201` `return_id`, `return_label_url` (if applicable), return instructions.
+
+* `POST /v1/fulfillment/returns/{returnId}/receive`
+  Mark items received: `{ "received_lines":[{line_id,qty,condition,serials}], "received_at":"..." }` → triggers inspection workflows.
+
+* `POST /v1/fulfillment/returns/{returnId}/inspect`
+  Record inspection results and recommended disposition `{ "disposition":"reshelve|repair|scrap|quarantine","restockable_qty":..., "notes":"..." }`.
+
+* `POST /v1/fulfillment/returns/{returnId}/complete`
+  Finalize return, create credit/return note event (calls Billing/Returns service via event).
+
+* `GET /v1/fulfillment/returns/{returnId}` / list returns by warehouse/status.
+
+* `POST /v1/fulfillment/returns/{returnId}/ship-back-to-supplier` — create outbound transfer to supplier for warranty/repair.
+
+---
+
+# 7 — 3PL / WMS connectors & integrations
+
+Register and manage connectors to external warehouses, 3PLs, and WMS.
+
+* `GET /v1/fulfillment/connectors` — list connectors (3PL, WMS vendor, carrier adapters).
+
+* `POST /v1/fulfillment/connectors` — register connector: `{ "type":"3pl|wms|ftp","config":{...},"priority":10 }`.
+
+* `GET /v1/fulfillment/connectors/{id}` / `PATCH` / `DELETE`.
+
+* `POST /v1/fulfillment/connectors/{id}/test` — run integration test (push sample picklist / pull inventory) and return diagnostics.
+
+* `POST /v1/fulfillment/connectors/{id}/sync-inventory` — trigger sync (pull inventory availability from WMS) — returns job id.
+
+* `POST /v1/fulfillment/connectors/{id}/push-fulfillment` — push fulfillment to 3PL (async job id).
+
+* `GET /v1/fulfillment/connectors/{id}/logs` — integration logs.
+
+---
+
+# 8 — Warehouse, zones & resources
+
+Manage warehouses, zones, workstations, capacity & worker assignments.
+
+* `GET /v1/fulfillment/warehouses` — list warehouses and capabilities.
+
+* `POST /v1/fulfillment/warehouses` — create warehouse record with address, timezones, serviceable regions.
+
+* `GET /v1/fulfillment/warehouses/{warehouseId}` / `PATCH` / `DELETE`.
+
+* `GET /v1/fulfillment/warehouses/{warehouseId}/zones` — pick/pack/receiving zones.
+
+* `POST /v1/fulfillment/warehouses/{warehouseId}/workers` — register warehouse worker (badge id, skills).
+
+* `POST /v1/fulfillment/warehouses/{warehouseId}/workstation` — create pack station or scale.
+
+* `GET /v1/fulfillment/warehouses/{warehouseId}/capacity` — capacity and throughput (picks/hour), used by scheduling.
+
+* `POST /v1/fulfillment/warehouses/{warehouseId}/slotting/recommend` — run slotting algorithm suggestion for hot SKUs (returns recommended bins/locations).
+
+---
+
+# 9 — Task management & operator actions
+
+Tasks and queues for workers and supervisors.
+
+* `GET /v1/fulfillment/tasks` — list tasks (pick, pack, QC, packing, label, inspection) filtered by `worker_id`, `zone`, `priority`.
+
+* `POST /v1/fulfillment/tasks` — create a task (manual override).
+
+* `POST /v1/fulfillment/tasks/{taskId}/claim` — worker claims task.
+
+* `POST /v1/fulfillment/tasks/{taskId}/complete` — complete task with optional result payload.
+
+* `GET /v1/fulfillment/queues` — operational queues (e.g., picking waves, QC queue).
+
+---
+
+# 10 — Serial / lot / expiry / traceability
+
+Support lot and serial tracking during picks and receives (important for regulated goods).
+
+* `POST /v1/fulfillment/serials/assign` — assign serial(s) to picked unit.
+
+* `POST /v1/fulfillment/lot/consume` — consume lot with lot\_id and qty on pick.
+
+* `GET /v1/fulfillment/traceability?serial=...` — trace serial across inbound/outbound.
+
+---
+
+# 11 — Returns to vendor / supplier shipments
+
+Create outbound shipments to suppliers for returns, repairs or transfers.
+
+* `POST /v1/fulfillment/vendor-shipments` — analogous to shipments but for vendor routes (ASN, RMA reference).
+
+* `GET /v1/fulfillment/vendor-shipments/{id}`
+
+---
+
+# 12 — Quality control & inspections
+
+Workflows for QC, quarantines, rework.
+
+* `POST /v1/fulfillment/qc/{fulfillmentId}/start` — start QC for fulfillment or return.
+
+* `POST /v1/fulfillment/qc/{qcId}/record` — record inspection details and attach photos/media via presigned URLs.
+
+* `POST /v1/fulfillment/qc/{qcId}/resolve` — disposition result (reshelve/repair/scrap).
+
+---
+
+# 13 — Events & webhooks
+
+Emit fulfillment events and accept inbound hooks from carriers & 3PL.
+
+* `GET /v1/fulfillment/webhooks`
+
+* `POST /v1/fulfillment/webhooks` `{ "url":"https://...","events":["fulfillment.created","picklist.completed","shipment.shipped","shipment.delivered","return.received"], "secret":"..." }` → `201`.
+
+* `DELETE /v1/fulfillment/webhooks/{id}` / `POST /v1/fulfillment/webhooks/test`.
+
+* `POST /v1/fulfillment/webhook/carrier` — endpoint for carrier callbacks (tracking updates). Validate signature, map to `shipment_id`, update status.
+
+Event payloads should include `fulfillment_id|shipment_id`, `status`, `timestamps`, `carrier_reference`, and `attempts` where applicable.
+
+---
+
+# 14 — Batch jobs, imports & exports
+
+Async jobs for large scale operations.
+
+* `POST /v1/fulfillment/imports` — import fulfillments/picklists from S3/NDJSON (returns job id).
+
+* `GET /v1/fulfillment/imports/{jobId}` — status & error report.
+
+* `POST /v1/fulfillment/exports` — export shipments, manifests, exception reports to S3 (job id).
+
+* `POST /v1/fulfillment/jobs/{jobId}/cancel` — cancel running job.
+
+---
+
+# 15 — Metrics, monitoring & health
+
+Operational and business metrics for fulfillment.
+
+* `GET /v1/fulfillment/health` — subsystems: connector workers, label generator, job queue, scanning service.
+
+* `GET /v1/fulfillment/metrics` — KPIs: `pick_rate_p50/p95`, `pack_throughput`, `on_time_ship_rate`, `ship_late_count`, `returns_processing_time`, `first_pass_yield`, `label_generation_latency`.
+
+* `GET /v1/fulfillment/slas` — SLA breach list for warehouses/orders.
+
+---
+
+# 16 — Admin / settings / routing rules
+
+Configure routing, carrier preferences, packaging rules, and thresholds.
+
+* `GET /v1/fulfillment/settings`
+
+* `PATCH /v1/fulfillment/settings` — set default warehouse preferences, allowed splits, packaging rules.
+
+* `GET /v1/fulfillment/routing-rules` / `POST /v1/fulfillment/routing-rules` — set rules (by SKU, weight, destination, service\_level) for automatic warehouse / carrier selection.
+
+* `GET /v1/fulfillment/packaging-profiles` / `POST` / `PATCH` — box dims and default packaging rules.
+
+---
+
+# 17 — Security & access
+
+Worker keys, device registration, RBAC for warehouse ops.
+
+* `GET /v1/fulfillment/keys` / `POST /v1/fulfillment/keys` — create device/worker keys (short-lived).
+
+* `POST /v1/fulfillment/devices/{deviceId}/register` — register handheld scanner / printer.
+
+* `GET /v1/fulfillment/roles` — warehouse roles: `picker`, `packer`, `supervisor`, `qc_agent`.
+
+---
+
+# 18 — Example resource shapes
+
+Fulfillment (canonical):
+
+```json
+{
+  "id":"ful_001",
+  "order_id":"ord_123",
+  "warehouse_id":"wh_london",
+  "status":"allocated",  // created|awaiting_allocation|allocated|picking|picked|packing|ready_to_ship|shipped|closed|cancelled
+  "lines":[ { "order_line_id":"line_1","sku":"SKU-1","qty":2, "allocated":[{"location":"loc_1","lot_id":"lot_11","qty":2}] } ],
+  "allocation_id":"alloc_01",
+  "picklist_id":"pick_12",
+  "packages":[ {"package_id":"pkg_1","weight":1200,"dimensions":{"l":30,"w":20,"h":10}} ],
+  "shipments":[ "sh_001" ],
+  "created_at":"2025-08-29T12:00:00Z",
+  "updated_at":"2025-08-29T12:15:00Z",
+  "metadata":{}
+}
+```
+
+Shipment (canonical):
+
+```json
+{
+  "id":"sh_001",
+  "fulfillment_id":"ful_001",
+  "status":"label_generated", // label_pending|label_generated|booked|in_transit|delivered|failed
+  "carrier":"DHL",
+  "carrier_service":"express",
+  "carrier_tracking_number":"JD000111222",
+  "label_url":"https://s3.../label_sh_001.pdf",
+  "packages":[ { "package_id":"pkg_1","weight":1200 } ],
+  "created_at":"2025-08-29T12:20:00Z",
+  "updated_at":"2025-08-29T12:21:00Z",
+  "metadata":{}
+}
+```
+
+Picklist (canonical):
+
+```json
+{
+  "id":"pick_12",
+  "warehouse_id":"wh_london",
+  "fulfillment_ids":["ful_001","ful_002"],
+  "status":"assigned", // draft|assigned|in_progress|completed|cancelled
+  "tasks":[ /* grouped by location */ ],
+  "created_at":"2025-08-29T11:50:00Z"
+}
+```
+
+Return (canonical):
+
+```json
+{
+  "id":"rtn_001",
+  "order_id":"ord_123",
+  "status":"awaiting_return", // awaiting_return|received|inspected|completed
+  "expected_lines":[ { "order_line_id":"line_3","qty":1 } ],
+  "received_lines":[],
+  "destination_warehouse_id":"wh_returns_london",
+  "created_at":"2025-08-30T09:00:00Z"
+}
+```
+
+---
+
+# 19 — Design notes & best practices (brief)
+
+* **Orchestration, not stock ownership:** Fulfillment orchestrates allocation/pick/pack/ship flows and relies on Inventory Service for authoritative stock. Use allocation APIs (and webhooks) rather than attempting to reimplement stock logic.
+* **Idempotency & optimistic concurrency:** require `Idempotency-Key` for creates and use `version`/ETag for updates to handle handheld retries.
+* **Small, streamable operations for handhelds:** provide small `scan` endpoints optimized for high throughput and low-latency; accept batched scans and return per-item validation.
+* **Pack-first vs ship-first flows:** support both pack-then-ship and ship-then-capture flows (capture/payment handled by Payment/Billing). Fulfillment must produce immutable `package` records used by Shipping.
+* **Asynchronous heavy ops:** label generation for many shipments, connector pushes to 3PL, manifest creation and batch exports should be async with job ids and progress logs.
+* **3PL & carrier connectors:** treat connectors as separate components; Fulfillment should have thin adapters and robust retry/backoff, and maintain idempotent push semantics.
+* **Traceability:** capture lot/serial/expiry on pick and nest into package records to support recalls and regulatory traceability. Provide `traceability` query per serial.
+* **Returns & QC:** return inspections often drive credit/refund decisions; surface inspection outcomes and evidence (photos via presigned URLs) to downstream Billing/Returns services.
+* **Auditable timeline:** every physical action (pick, pack, label, ship, receive) must append to a timeline with actor/device and correlation id for dispute and SLA analysis.
+* **Observability & SLAs:** track pick/pack latencies, first-pass yield, on-time ship %, mis-picks, and exception rates; expose per-warehouse dashboards.
+* **Security & devices:** device registration, short-lived worker keys and per-device logs are essential for fraud detection.
+* **Extensibility:** allow custom metadata per fulfillment/pick/package to support marketplace / B2B custom needs (e.g., `customs: { hs_code }`).
+
+---
+
+If you want I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the core endpoints (`/fulfillments`, `/picklists`, `/shipments`, `/returns`, `/connectors`),
+* produce **JSON schemas** for `fulfillment`, `picklist`, `shipment`, and `return` resources (useful for implementing request/response validation),
+* or design a **worker workflow architecture** (wave generation → picklist → handheld scans → pack station → shipment) with sequence diagrams and recommended data model and retries.
+
+Which one should I produce now?

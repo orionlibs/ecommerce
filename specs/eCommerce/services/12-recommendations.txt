@@ -1,0 +1,380 @@
+# Recommendation service — REST API surface
+
+Nice — here’s a comprehensive, focused RESTful API design for a **Recommendation** service that lives in a large eCommerce platform. It contains *only* endpoints that belong to recommendation concerns: candidate generation, ranking/scoring, model management, training & jobs, feedback/event collection, personalization/profiles, A/B testing & experiments, batch exports, embeddings/vector ops, feature store, explainability, caching, monitoring, security, and connectors. I deliberately avoid endpoints for products, carts, orders, stock, payments, users (CRUD) — those belong to their own services; here we assume you reference external `item_id` and `user_id` values.
+
+Common conventions
+
+* Base path: `https://api.example.com/v1/recs`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT) or service-to-service API keys. Multi-tenant via `X-Tenant-ID` header or tenant-scoped paths `/v1/{tenantId}/recs`.
+* Content type: `application/json`. Batch endpoints accept NDJSON or multipart.
+* Pagination: `limit`, `cursor`, `search_after` where applicable.
+* Common responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+
+---
+
+## 1 — Prediction / Recommendation endpoints (real-time)
+
+Primary runtime endpoints clients will call to get recommendations.
+
+* `POST /v1/recs/predict`
+  Purpose: Request recommendations (real-time).
+  Body highlights: `{ "user_id": "...", "context": { "location":"UK", "device":"mobile", "session_id":"..." }, "candidate_ids": [ ... ] (optional), "filters": { "category":"electronics" }, "exclude_ids":[...], "limit":20, "strategy":"hybrid|collab|content|graph", "model":"model_name_or_version", "return_scores":true, "explain":false }`
+  Response: `{ "request_id":"...", "items":[ { "item_id":"123","score":0.98, "reason":"popularity+cf", "explain":{...} } ], "model":"model_name@v3" }`
+
+* `GET /v1/recs/users/{userId}`
+  Purpose: Cached/top-N recommendations for a user. Query params: `limit`, `strategy`, `model`, `fresh=true|false` (force regeneration).
+
+* `POST /v1/recs/users/{userId}/realtime`
+  Purpose: Score/generate recommendations for a single user with full context (same body options as /predict).
+
+* `POST /v1/recs/score`
+  Purpose: Score a given list of candidate item IDs for a user (reranking). Body: `{ "user_id":"u1","candidates":[{"item_id":"i1","features":{...}}, ...], "model":"ranker_v1", "return_sorted":true }`
+
+* `POST /v1/recs/rerank`
+  Purpose: Re-rank a server-provided candidate list using personalization model and business rules. Accepts `candidates` array + `business_rules` refs.
+
+* `GET /v1/recs/item/{itemId}/related`
+  Purpose: Related-item suggestions (content-similar or co-viewed). Query: `limit`, `strategy=co_view|co_buy|content`.
+
+* `POST /v1/recs/batch/predict`
+  Purpose: Synchronous batch predict for multiple users (small batches). Body: `{ "requests":[ {"user_id":"u1","context":{...}, "limit":10}, {...} ] }` → returns array of results.
+
+* `POST /v1/recs/async/batch`
+  Purpose: Submit large batch recommendation job (exportable). Body: batch spec (list of user ids or query), `model`, `dest` (s3/gcs). Returns `202` + job id.
+
+Key query options widely used across predict endpoints: `diversity`, `novelty`, `freshness`, `serendipity_score_threshold`, `filter_query` (e.g. price range), `explain=true`, `seed` (for deterministic sampling), `timeout_ms`.
+
+---
+
+## 2 — Candidate generation & pipelines
+
+Endpoints to manage and request candidate generation modules.
+
+* `POST /v1/recs/candidates/generate`
+  Purpose: Generate candidate pool for a given user/context. Body: `{ "user_id":"u1","context":{...},"generator":"popularity|collab|content|graph|embedding","limit":500, "filters":{...} }`
+  Response: `candidates` list (ids + metadata + scores).
+
+* `GET /v1/recs/candidates/{generatorName}/status`
+  Purpose: Check generator health/metrics.
+
+* `POST /v1/recs/pipelines`
+  Purpose: Create/declare a candidate+ranking pipeline: `{ "name":"homepage_hybrid", "stages":[ {"type":"candidate","generator":"co_view"}, {"type":"filter","rules":[...]}, {"type":"ranker","model":"ranker_v2"}, {"type":"postprocess","diversity":"category"} ] }`
+
+* `GET /v1/recs/pipelines/{pipelineId}` / `PATCH` / `DELETE` — manage pipelines.
+
+* `POST /v1/recs/pipelines/{id}/run`
+  Purpose: Execute pipeline against a specific user/context (useful for testing or batch precompute). Returns pipeline run id + results.
+
+---
+
+## 3 — Model management, versions & deployment
+
+Manage recommendation/ranker models, model versions, deployments and canarying.
+
+* `GET /v1/recs/models`
+  Purpose: List models (candidate generators, rankers, embedding models) with metadata (type, supported features).
+
+* `POST /v1/recs/models`
+  Purpose: Register a new model (metadata only). Body example: `{ "name":"ranker", "type":"learning_to_rank", "framework":"xgboost|tensorflow|pytorch", "input_schema":{...}, "output_schema":{...} }` → `201`.
+
+* `GET /v1/recs/models/{modelId}` / `PATCH` / `DELETE`
+
+* `POST /v1/recs/models/{modelId}/versions`
+  Purpose: Upload or register a new model binary or reference (artifact location). Body: `{ "version":"v1.2.0", "artifact_url":"s3://...", "metadata":{...}, "training_job_id":"..." }` → returns version id.
+
+* `GET /v1/recs/models/{modelId}/versions`
+  Purpose: List versions and statuses (deployed, staging, archived).
+
+* `POST /v1/recs/models/{modelId}/versions/{versionId}/deploy`
+  Purpose: Deploy a version to an environment (prod/staging/canary). Body: `{ "env":"prod", "traffic_pct": 100 }` → returns deployment id.
+
+* `POST /v1/recs/models/{modelId}/versions/{versionId}/rollback`
+  Purpose: Rollback to previous version.
+
+* `GET /v1/recs/models/{modelId}/metrics`
+  Purpose: Model metrics (AUC, NDCG\@k, CTR lift, latency, model size) optionally filtered by version and timeframe.
+
+* `GET /v1/recs/models/{modelId}/explain-schema`
+  Purpose: Returns what explainability features the model supports (feature importances, SHAP).
+
+---
+
+## 4 — Training, evaluation & jobs
+
+Asynchronous training/evaluation pipelines and their management.
+
+* `POST /v1/recs/jobs/train`
+  Purpose: Kick off a training job. Body: `{ "model_id":"ranker", "version":"v3","data_source":{ "type":"feature_store|s3|connector","spec":{...}}, "hyperparameters":{...}, "compute_profile":"gpu-large", "notify_webhook":"..." }` → returns job id.
+
+* `GET /v1/recs/jobs/{jobId}`
+  Purpose: Check job status, logs, artifacts, metrics.
+
+* `POST /v1/recs/jobs/evaluate`
+  Purpose: Run offline evaluation on holdout data. Body: `{ "model_version":"ranker@v3","metrics":["ndcg@10","auc","precision@k"], "dataset":"s3://..." }` → returns evaluation id.
+
+* `GET /v1/recs/jobs/{jobId}/results` — download evaluation outputs, validation reports, confusion matrices, baseline comparisons.
+
+* `POST /v1/recs/jobs/stop` / `DELETE /v1/recs/jobs/{jobId}/cancel`.
+
+* `GET /v1/recs/jobs` — list jobs (train/eval/reindex/featurebackfill) with filters.
+
+---
+
+## 5 — Feature store & feature ingestion
+
+Read and write features used by models (user/item/context features). The service can provide a lightweight feature store or integrate with a dedicated one.
+
+* `GET /v1/recs/features/entities/{entityType}/{entityId}`
+  Purpose: Retrieve cached features for `user` or `item`. e.g. `/features/entities/user/{userId}`.
+
+* `POST /v1/recs/features/entities/{entityType}/{entityId}`
+  Purpose: Upsert features for an entity. Body: `{ "features": { "avg_session_value": 12.3, "last_active":"2025-08-20T..." } }`
+
+* `POST /v1/recs/features/bulk`
+  Purpose: Bulk upsert features (NDJSON or array).
+
+* `GET /v1/recs/features/schema`
+  Purpose: List feature definitions, types, freshness constraints, TTL.
+
+* `POST /v1/recs/features/ingest`
+  Purpose: Define or trigger ingestion pipelines to populate features from connectors (s3, events, product service). Body: `{ "source":"kafka_topic", "transform":"script_or_pipeline_spec", "destination_index":"features" }`
+
+* `GET /v1/recs/features/health` — feature store health & staleness metrics.
+
+---
+
+## 6 — Feedback, events & interaction collection
+
+Collect user interactions (impressions, clicks, add-to-cart, purchases) and explicit feedback to train/evaluate models and close the loop.
+
+* `POST /v1/recs/events`
+  Purpose: Ingest single event (low-latency). Body: `{ "type":"impression|click|add_to_cart|purchase|rating|explicit_feedback", "user_id":"u1", "item_id":"i1", "timestamp":"...", "session_id":"...", "metadata":{...} }`
+  Response: `201`.
+
+* `POST /v1/recs/events/bulk`
+  Purpose: Bulk event ingestion (NDJSON or file upload). Returns job id.
+
+* `GET /v1/recs/events/{eventId}` / `DELETE /v1/recs/events/{eventId}` (admin).
+
+* `GET /v1/recs/events/stream` (server-sent events / webhooks)
+  Purpose: Stream processed events to downstream systems (or provide a Kafka/stream connector).
+
+* `POST /v1/recs/feedback`
+  Purpose: Submit human evaluation or labeled data: `{ "user_id","item_id","label":"relevant|not_relevant", "source":"panel", "confidence":0.9 }`
+
+* `GET /v1/recs/feedback/{id}` / `GET /v1/recs/feedback` — review collected labels.
+
+---
+
+## 7 — Experiments / A-B / multi-armed bandit
+
+Manage experiments and traffic allocation for model comparisons.
+
+* `POST /v1/recs/experiments`
+  Purpose: Create an experiment. Body: `{ "name":"ranker_ab_test","variants":[ {"id":"vA","model":"ranker@v2","traffic":50},{"id":"vB","model":"ranker@v3","traffic":50}], "metrics":["ctr","conversion_rate"], "start":"...", "end":"..." }`
+
+* `GET /v1/recs/experiments/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/recs/experiments/{id}/assign`
+  Purpose: Force-assign a user/session to a variant for debugging.
+
+* `GET /v1/recs/experiments/{id}/results`
+  Purpose: Live experiment metrics, confidence intervals, sample sizes, winner determination.
+
+* `POST /v1/recs/exploration/bandit`
+  Purpose: Configure / query multi-armed bandit policies (epsilon-greedy, UCB).
+
+---
+
+## 8 — Embeddings, vector store & hybrid search
+
+Support embeddings for semantic recommendations and k-NN search.
+
+* `POST /v1/recs/embeddings/index`
+  Purpose: Index an embedding vector for an item or user. Body: `{ "id":"item:123", "vector":[0.01,0.23,...], "metadata":{ "category":"phones" } }`
+
+* `POST /v1/recs/embeddings/bulk` — bulk index vectors.
+
+* `POST /v1/recs/embeddings/search`
+  Purpose: k-NN nearest neighbor search. Body: `{ "vector":[...], "k":50, "filters":{...}, "index":"items_embeddings" }` → returns ids + distances.
+
+* `GET /v1/recs/embeddings/{id}` / `DELETE /v1/recs/embeddings/{id}`
+
+* `POST /v1/recs/embeddings/generate`
+  Purpose: Generate embeddings from a text or item payload using a hosted model (if provided by recs service). Body: `{ "input":"Samsung phone 55 inch", "model":"embed_v1" }` → returns `vector`.
+
+---
+
+## 9 — Batch recompute, exports & backfills
+
+Large offline recomputations and exporting recommendation results.
+
+* `POST /v1/recs/batch/precompute`
+  Purpose: Precompute top-N lists for many users (for caching/low-latency responses). Body: `{ "user_query":"segment=high_value", "pipeline":"homepage_hybrid", "dest":"redis|s3", "schedule":"cron|once" }` → job id.
+
+* `GET /v1/recs/batch/jobs/{jobId}` — status, progress, errors.
+
+* `POST /v1/recs/exports`
+  Purpose: Export recommendation outputs or feature vectors to storage. Body: `{ "query": {...}, "format":"parquet|csv|ndjson", "destination":"s3://..." }`
+
+* `POST /v1/recs/backfill/features`
+  Purpose: Backfill features for historical data used in model training.
+
+---
+
+## 10 — Explainability / Interpretability
+
+Provide explainability artifacts for transparency and debugging.
+
+* `POST /v1/recs/explain`
+  Purpose: Explain why an item was recommended for a user. Body: `{ "user_id":"u1","item_id":"i1","model":"ranker@v3","context":{...} }` → returns feature contributions, SHAP-like values, rule triggers.
+
+* `GET /v1/recs/models/{modelId}/versions/{versionId}/feature-importance`
+  Purpose: Aggregate feature importance for model version.
+
+---
+
+## 11 — Caching, storage & TTL control
+
+Manage caches for low-latency top-N results and cached pipelines.
+
+* `GET /v1/recs/cache/status`
+  Purpose: Show hit rate, miss rate, TTLs per pipeline.
+
+* `POST /v1/recs/cache/invalidate`
+  Purpose: Invalidate cache keys: `{ "keys":["user:123:homepage"], "patterns": ["segment:*"], "item_ids":[...], "pipeline":"homepage_hybrid" }`
+
+* `POST /v1/recs/cache/prewarm`
+  Purpose: Pre-warm cache for a set of users/pipelines.
+
+---
+
+## 12 — Connectors & integrations
+
+Configure connectors to ingest catalog, user, or event data (used for training/feature population).
+
+* `GET /v1/recs/connectors`
+
+* `POST /v1/recs/connectors` `{ "type":"s3|kafka|product_service|user_service","config":{...},"target":"events|features|items" }`
+
+* `POST /v1/recs/connectors/{id}/run` — trigger sync.
+
+* `GET /v1/recs/connectors/{id}/logs`
+
+---
+
+## 13 — Monitoring, metrics & health
+
+Operational endpoints for SRE and data scientists.
+
+* `GET /v1/recs/health`
+  Purpose: Service health (model serving, feature store, queue, db, embedding index).
+
+* `GET /v1/recs/metrics`
+  Purpose: Query metrics (QPS, avg latency, p50/p95/p99 latency across predict/score endpoints, error rates). Accepts time range.
+
+* `GET /v1/recs/usage`
+  Purpose: Per-tenant usage (requests, model inferences, feature store storage, embedding index size).
+
+* `GET /v1/recs/logs` — access request/serving logs (with filters).
+
+---
+
+## 14 — Security, keys & rate-limits
+
+* `GET /v1/recs/keys`
+
+* `POST /v1/recs/keys` `{ "name":"web-frontend-read","scopes":["predict"], "expires_in":"30d" }` → returns plaintext key once.
+
+* `DELETE /v1/recs/keys/{keyId}`
+
+* `GET /v1/recs/rate-limits` — show & configure per-key/tenant limits (admin).
+
+---
+
+## 15 — Webhooks & event notifications
+
+Notify downstream systems when jobs complete, models deployed, experiments finish.
+
+* `GET /v1/recs/webhooks`
+* `POST /v1/recs/webhooks` `{ "url":"https://...","events":["job.completed","model.deployed","experiment.completed"], "secret":"..." }`
+* `DELETE /v1/recs/webhooks/{id}`
+
+---
+
+## 16 — Admin / governance / quotas / policies
+
+* `GET /v1/recs/quotas` / `PATCH /v1/recs/quotas` — per-tenant limits (models, storage, inference QPS).
+* `GET /v1/recs/policies` / `POST /v1/recs/policies` — business rules that apply to recommendation outputs (e.g., exclude competitor items, placement rules, regulatory constraints).
+* `GET /v1/recs/audit/logs` — who adjusted experiments, deployed models, changed pipelines (for compliance).
+
+---
+
+## 17 — Utilities / debug / developer tools
+
+* `POST /v1/recs/simulate`
+  Purpose: Run an offline simulation of an experiment or pipeline across sample traffic to estimate impact (CTR uplift, revenue). Body: experiment spec or pipeline + sample dataset.
+
+* `POST /v1/recs/seed`
+  Purpose: Seed recommendations for cold-start users (define fallback lists or strategies).
+
+* `POST /v1/recs/health/check-model` — test model latency & correctness with a sample payload.
+
+---
+
+## Typical request/response examples
+
+**Predict request**
+
+```json
+POST /v1/recs/predict
+{
+  "user_id":"user_123",
+  "context": { "device":"mobile", "country":"GB", "session_id":"s_987" },
+  "filters": { "category":"headphones", "price_max":150 },
+  "exclude_ids":["i321","i432"],
+  "limit":10,
+  "strategy":"hybrid",
+  "model":"homepage_ranker@v4",
+  "return_scores": true,
+  "explain": true
+}
+```
+
+**Predict response (200)**
+
+```json
+{
+  "request_id":"req_abc123",
+  "model":"homepage_ranker@v4",
+  "items":[
+    { "item_id":"i999","score":0.987, "reason":"cf+recency", "explain": { "feature_contrib":[["cf_sim",0.5],["recency",0.2]] }},
+    { "item_id":"i234","score":0.842, "reason":"content+popularity" }
+  ],
+  "served_at":"2025-08-29T12:34:56Z"
+}
+```
+
+---
+
+## Design & implementation notes (brief)
+
+* Keep **candidate generation** and **ranking** separated (allows modular pipelines).
+* Make prediction endpoint **stateless** and idempotent; support deterministic `seed` for reproducible sampling.
+* Prefer **async jobs** for training, bulk precompute, and large exports. Return job IDs and job status endpoints.
+* Provide **explainability** for business/regulatory needs (feature attributions, rule triggers).
+* Maintain a **feature store** (or integrate with one) for consistent features across training and serving; surface feature staleness.
+* Support **embeddings/vector search** for semantic/hybrid recommendations (k-NN index).
+* Offer **A/B experiment management** and online experiment metrics to let product teams measure impact.
+* Provide **cache management** for precomputed top-N lists and fast fallbacks for cold-starts.
+* Instrument thoroughly: provide p50/p95/p99 latencies, model inference counts, and per-model business KPIs (CTR, conversion).
+
+---
+
+Want the next step?
+
+* I can generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`/predict`, `/score`, `/models`, `/jobs`, `/events`),
+* or provide **detailed request/response JSON schemas** for a subset (predict + feedback + training job),
+* or design the **real-time serving architecture** (model servers, feature store cache, async queues) that backs these endpoints.
+
+Which would you like me to produce now?

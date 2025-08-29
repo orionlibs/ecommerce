@@ -1,0 +1,304 @@
+# Metrics, KPIs & Analytics Service — REST API surface
+
+Below is a focused, comprehensive REST API design for a **Metrics, KPIs & Analytics Service** that provides telemetry ingestion, real-time and historical metrics, time-series queries, dashboards, alerting/anomaly detection, cohorting, model training/forecasting, rollups and exports. This service is the platform’s *analytics backbone* (derived/aggregated store), not the source of business events — it ingests or subscribes to events/metrics from other services and produces queryable aggregates and alerts.
+
+> Conventions (applies to all endpoints)
+>
+> * Base path: `https://api.example.com/v1/metrics` (tenant via `X-Tenant-ID` or `/v1/{tenantId}/metrics`)
+> * Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Roles: `viewer`, `analyst`, `admin`.
+> * Content-Type: `application/json`. Bulk ingest accepts NDJSON / S3 pointers.
+> * Pagination: cursor + `limit`. Time: RFC3339. Money as minor units if used.
+> * Mutating endpoints accept `Idempotency-Key`. Concurrency: `If-Match`/`ETag` on resource edits.
+> * Standard responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+> * Query semantics: supply `start`, `end`, `granularity` (`1m`,`5m`,`1h`,`1d`), `group_by` and `filters`. Support `max_staleness_seconds` / `force_fresh`.
+
+---
+
+## 1 — Ingestion, connectors & validation
+
+Accept metrics, events and register connectors.
+
+* `POST /v1/metrics/ingest`
+  Ingest single metric/event or small batch. Body: single object or array of `{ metric_name, value, timestamp, source, tags, metadata }`. Returns `202` with ingestion id(s).
+
+* `POST /v1/metrics/ingest/bulk`
+  Bulk NDJSON or S3 pointer ingestion. Returns `202` job id.
+
+* `POST /v1/metrics/ingest/validate`
+  Dry-run validate payload(s) against registered metric/event schemas (no persist).
+
+* `GET /v1/metrics/connectors`
+  List connectors (Kafka, Kinesis, webhooks, S3, syslog).
+
+* `POST /v1/metrics/connectors`
+  Register connector: `{ type:"kafka|s3|webhook|pubsub", config:{...}, filters }`.
+
+* `POST /v1/metrics/connectors/{id}/run` — immediate fetch / test run.
+
+* `GET /v1/metrics/connectors/{id}/status` — lag, last watermark, error rate.
+
+---
+
+## 2 — Canonical metric / schema management
+
+Define and manage canonical metrics and derived KPIs.
+
+* `GET /v1/metrics/definitions`
+  List metric/KPI definitions.
+
+* `POST /v1/metrics/definitions`
+  Create metric/KPI definition: `{ id, name, description, type:"counter|gauge|histogram|timing|event", unit, tags, aggregation_default:"sum|avg|p95", retention_days, schema }`.
+
+* `GET /v1/metrics/definitions/{metricId}` / `PATCH` / `DELETE` (soft delete).
+
+* `POST /v1/metrics/definitions/{metricId}/backfill`
+  Request a backfill for a metric over time window (async job id).
+
+---
+
+## 3 — Time-series queries & KPI APIs
+
+Primary query surface for dashboards and clients.
+
+* `POST /v1/metrics/query`
+  General time-series query. Body example:
+
+  ```json
+  {
+    "metrics":["orders_count","revenue_gross"],
+    "start":"2025-08-01T00:00:00Z",
+    "end":"2025-08-31T23:59:59Z",
+    "granularity":"1d",
+    "group_by":["country","channel"],
+    "filters":{ "country":["GB","IE"], "channel":["web"] },
+    "aggregation":"sum",
+    "max_staleness_seconds":60
+  }
+  ```
+
+  Response: grouped time-buckets with metric values + metadata (`calculated_at`, `data_freshness_seconds`).
+
+* `POST /v1/metrics/query/instant`
+  Return current (latest) values for metrics (for badges/headers).
+
+* `GET /v1/metrics/series/{seriesId}`
+  Fetch raw series by id (for drill-down).
+
+* `POST /v1/metrics/series/search`
+  Discover series by tags / field values.
+
+* `POST /v1/metrics/aggregate`
+  Produce a single aggregate numeric (e.g., `sum(revenue)` over window) for quick checks.
+
+* `POST /v1/metrics/timeseries/batch`
+  Run multiple queries in a single call (for dashboard rendering). Returns job id if heavy.
+
+---
+
+## 4 — Rollups, retention & rollup jobs
+
+Manage rollup policies and re-computation.
+
+* `GET /v1/metrics/rollups` — list rollup rules (hourly→daily etc).
+* `POST /v1/metrics/rollups` — create rollup rule: `{ metric, from_granularity, to_granularity, aggregation }`.
+* `POST /v1/metrics/rollups/{id}/run` — run rollup job (async).
+* `POST /v1/metrics/retention/policies` — define retention by metric type.
+* `POST /v1/metrics/backfills` — schedule/backfill job; `GET /v1/metrics/backfills/{jobId}`.
+
+---
+
+## 5 — Dashboards, widgets & saved queries
+
+Create dashboards and reusable widgets.
+
+* `GET /v1/metrics/dashboards`
+
+* `POST /v1/metrics/dashboards` `{ name, description, widgets:[{type:"timeseries", query, layout}], sharing }` → `201`.
+
+* `GET /v1/metrics/dashboards/{id}` / `PATCH` / `DELETE`.
+
+* `GET /v1/metrics/widgets/{widgetId}` / `POST /v1/metrics/widgets` — save single widget / query.
+
+* `POST /v1/metrics/dashboards/{id}/render` — render dashboard snapshot (returns JSON + optional PNG export job).
+
+---
+
+## 6 — Alerts, thresholds & anomaly detection
+
+Create alerts and anomaly detectors with notification integrations.
+
+* `GET /v1/metrics/alerts`
+
+* `POST /v1/metrics/alerts`
+  Create alert rule: `{ name, query:{...}, condition:{ op:"gt|lt|change_pct", threshold }, window:"5m", severity:"critical|warning", notify:[{type:"email|webhook|slack", target}], throttle_seconds }`.
+
+* `PATCH /v1/metrics/alerts/{alertId}` / `DELETE`.
+
+* `POST /v1/metrics/alerts/{alertId}/test` — test triggers.
+
+* `GET /v1/metrics/anomalies`
+
+* `POST /v1/metrics/anomalies/register` — create anomaly detection rule: `{ metric, method:"zscore|seasonal_esd|prophet", sensitivity, group_by }`.
+
+* `POST /v1/metrics/anomalies/scan` — run scan for time window (async). `GET /v1/metrics/anomalies/{jobId}`.
+
+* `GET /v1/metrics/notifications` — list recent alert notifications and statuses.
+
+---
+
+## 7 — Cohorts, segmentation & retention
+
+APIs for cohort analysis and customer segmentation (analytics-focused).
+
+* `POST /v1/metrics/cohorts/define`
+  Define cohort: `{ name, criteria:{ first_order_date, campaign, segment_rule }, description }`.
+
+* `POST /v1/metrics/cohorts/{id}/retention`
+  Compute retention table for cohort (returns matric of period retention % and cohort size).
+
+* `POST /v1/metrics/customers/segment`
+  Create ad-hoc customer segment by rules and return sample customer ids (or count).
+
+* `POST /v1/metrics/cohorts/adhoc` — ad-hoc cohort query without persisting.
+
+---
+
+## 8 — Forecasting, models & what-if
+
+Manage ML models and run forecasts / scenario simulations.
+
+* `GET /v1/metrics/models` — list trained models (demand, ltv, churn).
+* `POST /v1/metrics/models` — create training job: `{ type:"demand|ltv|anomaly|seasonality", dataset:{query_id or connector}, params }` → returns `model_id` + job id.
+* `GET /v1/metrics/models/{modelId}` — status, metrics, version.
+* `POST /v1/metrics/models/{modelId}/predict` — run prediction for given input (returns forecast with CI).
+* `POST /v1/metrics/whatif` — scenario simulation: `{ scenario:"price_up_5", affected_series, horizon:"30d" }` → returns predicted delta metrics.
+* `GET /v1/metrics/models/{modelId}/explain` — feature importance / provenance.
+
+---
+
+## 9 — Exports, reports & scheduled jobs
+
+Export data and schedule recurring reports.
+
+* `POST /v1/metrics/exports`
+  Export query results to `s3://...` or email in `csv|parquet|xlsx`. Body: `{ query, format, destination, compress, notify_on_completion }` → `202` job id.
+
+* `GET /v1/metrics/exports/{jobId}` — status + link.
+
+* `POST /v1/metrics/reports/schedule`
+  Schedule report: `{ name, query_id, cron, destination, format }` → `201`.
+
+* `GET /v1/metrics/reports/{id}` / `PATCH` / `DELETE`.
+
+---
+
+## 10 — Realtime streams & subscriptions
+
+Push / pull real-time metrics and subscribe to changes.
+
+* `POST /v1/metrics/subscriptions`
+  Create subscription: `{ query, delivery:"webhook|kafka|sse", endpoint, throttle_seconds }` → returns `subscription_id`.
+
+* `GET /v1/metrics/subscriptions/{id}` / `PATCH` / `DELETE`.
+
+* `WS /v1/metrics/realtime` or `SSE /v1/metrics/stream` — client can open stream and subscribe to topics (auth required).
+
+---
+
+## 11 — Audit, access logs & RBAC
+
+Govern who can view/modify metrics and record accesses.
+
+* `GET /v1/metrics/audit` — list mutations and job actions (who ran backfills, created alerts).
+* `GET /v1/metrics/access-logs` — read accesses (PII-sensitive).
+* `GET /v1/metrics/roles` / `POST /v1/metrics/roles` — manage roles and scopes.
+* `GET /v1/metrics/permissions/me` — effective permissions for caller.
+
+---
+
+## 12 — Admin / settings / quotas
+
+Tenant settings for retention, cardinality, and quotas.
+
+* `GET /v1/metrics/settings` — returns `{ retention_defaults, max_cardinality, allowed_connectors, ingest_rate_limit }`.
+* `PATCH /v1/metrics/settings` — tenant admin updates.
+* `GET /v1/metrics/quotas` / `PATCH /v1/metrics/quotas` — control ingestion/query quotas per tenant or API key.
+
+---
+
+## 13 — Health, metrics & diagnostics (SRE)
+
+Observability endpoints for the service itself.
+
+* `GET /v1/metrics/health` — subsystems: ingest pipeline, storage, rollup workers, query engine, ML worker.
+* `GET /v1/metrics/diagnostics` — ingest lag, backfill queue, hot cardinalities, query p50/p95/p99 latency.
+* `GET /v1/metrics/metrics` — internal KPIs for the service (ingest\_rate, error\_rate).
+
+---
+
+## 14 — Example request/response (KPI time-series)
+
+**Request**
+
+```http
+POST /v1/metrics/query
+Content-Type: application/json
+
+{
+  "metrics": ["orders_count", "revenue_gross"],
+  "start":"2025-08-01T00:00:00Z",
+  "end":"2025-08-07T23:59:59Z",
+  "granularity":"1d",
+  "group_by":["country"],
+  "filters": { "channel": ["web","mobile"] },
+  "aggregation":"sum",
+  "max_staleness_seconds": 30
+}
+```
+
+**Response (abridged)**
+
+```json
+{
+  "query_id":"q_987",
+  "calculated_at":"2025-09-01T02:00:00Z",
+  "data_freshness_seconds":12,
+  "groups":[
+    {
+      "key":{"country":"GB"},
+      "buckets":[
+        {"time":"2025-08-01T00:00:00Z","orders_count":120,"revenue_gross":3450000},
+        {"time":"2025-08-02T00:00:00Z","orders_count":132,"revenue_gross":3520000}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## 15 — Design notes & best practices (brief)
+
+* **Derived store:** keep analytics as a derived, read-optimized store. Ingest events/metrics with strong deduplication (event id) and watermarks.
+* **Tiered storage & rollups:** raw events hot (short TTL), hourly/daily rollups warm, long-term aggregates cold — configurable retention per metric.
+* **Cardinality control:** monitor and cap cardinality (tags × dimensions) and offer pre-aggregation or sample modes. Warn when high-cardinality queries are requested.
+* **Deterministic aggregation:** use event dedupe, idempotent ingestion and monotonic watermarks to avoid double-counting. Support full recompute/backfill jobs.
+* **Freshness metadata:** all query responses must include `calculated_at` and `data_freshness_seconds`. Provide `force_fresh=true` option for authoritative compute.
+* **Explainability & provenance:** attach provenance to aggregates (which source connectors & events contributed), and expose `calculation_id` for audit.
+* **Alert reliability:** dedupe alert notifications, support backoff/throttling, and provide test hooks.
+* **Model transparency:** for ML forecasts, include confidence intervals and model metadata (training window, features) to facilitate trust.
+* **Security & PII:** redact or pseudonymize PII in analytics; apply stricter access controls for exports. Log access to sensitive artifacts.
+* **Observability:** instrument ingest lag, query latencies, backfill failures and anomaly detection false positives. Provide tenant SLO dashboards.
+* **Dry-run & preview:** allow `dry_run` for heavy queries/exports so analysts can validate cost/impact.
+* **Interoperability:** provide connectors/sinks to data lakes (S3, BigQuery, Snowflake), BI tools and streaming (Kafka) for downstream BI/ML.
+* **Cost controls:** surface estimated cost for heavy queries and allow admins to limit/approve expensive operations.
+
+---
+
+If you’d like, I can now:
+
+* generate an **OpenAPI skeleton** for the core endpoints (`/ingest`, `/query`, `/dashboards`, `/alerts`, `/exports`),
+* produce **JSON schemas** for `metric definition`, `query request` and `time-series response`,
+* or design the **rollup/backfill architecture** (sequence diagram + job semantics + dedup/replay behavior).
+
+Pick one and I’ll produce it right away.

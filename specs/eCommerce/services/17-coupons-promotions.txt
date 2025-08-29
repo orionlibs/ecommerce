@@ -1,0 +1,431 @@
+# Coupons, Vouchers & Promotions Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for a **Coupons, Vouchers & Promotions** service. It contains *only* endpoints that belong to coupon/voucher/promotion concerns: coupon lifecycle, promotion/campaign management, eligibility and targeting rules, validation & preview, redemption operations, usage/quota controls, scheduling, analytics, import/export, webhooks, audit and admin. I **do not** include product, cart, order, pricing, inventory, payments, or user-profile CRUD endpoints — those belong to other services and are referenced here by `sku`, `product_id`, `order_id`, `user_id`, etc.
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/promotions`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths `/v1/{tenantId}/promotions`.
+* Content-type: `application/json`. Bulk import can accept `multipart/form-data` or NDJSON.
+* Pagination: `page`/`limit` or cursor `cursor`/`limit`.
+* Common query params: `status`, `campaign_id`, `code`, `user_id`, `start`, `end`, `sort`.
+* Standard responses: `200 OK`, `201 Created`, `202 Accepted` (async job), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `429 Too Many Requests`, `500 Internal Server Error`.
+* Idempotency: mutation endpoints accept `Idempotency-Key`.
+* Audit: all mutations should record actor and reason.
+
+---
+
+# 1 — Coupons / Vouchers (code-based single-use/multi-use objects)
+
+Manage coupon code objects (create, lookup, update, revoke, bulk gen).
+
+* `POST /v1/promotions/coupons`
+  Create coupon(s) (single or template to generate many). Body: `{ "code":"SUMMER10","type":"percentage|fixed|free_shipping|gift_card","value":10, "currency":"GBP", "max_uses":1000, "per_customer_limit":1, "valid_from":"2025-08-01T00:00:00Z", "valid_until":"2025-09-01T00:00:00Z", "campaign_id":"camp_1", "metadata":{...} }`
+  Returns: created coupon object or generation instruction (for bulk).
+
+* `POST /v1/promotions/coupons/generate`
+  Bulk-generate numeric/alphanumeric codes from a template. Body: `{ "template_id":"tmpl_1","count":1000,"pattern":"PREFIX-{RAND:8}","unique":true }` → async job id.
+
+* `GET /v1/promotions/coupons`
+  List coupons. Filters: `code`, `campaign_id`, `status=active|expired|revoked|draft`, `type`, `created_by`. Support `fields` and `expand=usage_stats,campaign`.
+
+* `GET /v1/promotions/coupons/{couponId}`
+  Get full coupon object (including redemption history summary and limits).
+
+* `PATCH /v1/promotions/coupons/{couponId}`
+  Update coupon metadata, validity window, limits (subject to policy). Use optimistic concurrency.
+
+* `DELETE /v1/promotions/coupons/{couponId}`
+  Soft-delete or revoke. Query: `hard=true` (admin only).
+
+* `POST /v1/promotions/coupons/{couponId}/revoke`
+  Immediately mark as revoked and optionally refund reserved redemptions.
+
+* `GET /v1/promotions/coupons/{couponId}/redeemers`
+  List users/customers who redeemed (paginated).
+
+* `GET /v1/promotions/coupons/lookup?code=SUMMER10`
+  Resolve coupon by code (fast lookup for storefronts). Returns basic coupon details + status.
+
+---
+
+# 2 — Promotions / Campaigns (high-level grouping & lifecycle)
+
+Campaigns group rules, promotions, creative, channels and can contain price-lists or coupon sets.
+
+* `POST /v1/promotions/campaigns`
+  Create campaign. Body: `{ "name":"Summer Sale","description":"Sitewide summer campaign","status":"draft|active|paused|ended","channels":["web","email"], "budget":{...}, "start":"2025-08-01","end":"2025-08-31","metadata":{} }` → returns `campaign_id`.
+
+* `GET /v1/promotions/campaigns`
+  List campaigns (filter by status, channel, date).
+
+* `GET /v1/promotions/campaigns/{campaignId}` / `PATCH` / `DELETE`
+
+* `POST /v1/promotions/campaigns/{campaignId}/activate`
+  Activate campaign (validity rules enforced). Response: `200`.
+
+* `POST /v1/promotions/campaigns/{campaignId}/pause` / `/resume` / `/end`
+
+* `GET /v1/promotions/campaigns/{campaignId}/assets`
+  List coupons, creatives, segments, rules associated with campaign.
+
+---
+
+# 3 — Rules & Eligibility Engine (conditions for applicability)
+
+Rule objects express eligibility logic; service evaluates them during preview/validation and compute.
+
+* `POST /v1/promotions/rules`
+  Create rule. Body DSL example:
+
+  ```json
+  {
+    "name":"min_cart_50_exclude_sale",
+    "type":"eligibility",
+    "condition": {
+      "all":[
+        {"cart_total":{"gte":50,"currency":"GBP"}},
+        {"not":{"product_tags":["clearance","final_sale"]}},
+        {"customer_segment":"new_customers"}
+      ]
+    },
+    "priority": 100,
+    "metadata": {}
+  }
+  ```
+
+  Returns rule id.
+
+* `GET /v1/promotions/rules` / `GET /v1/promotions/rules/{ruleId}` / `PATCH` / `DELETE`
+
+* `POST /v1/promotions/rules/simulate`
+  Simulate rule against sample context (returns evaluation boolean and which clauses matched).
+
+* `POST /v1/promotions/rules/compile`
+  Compile DSL to optimized runtime artifact (for low-latency evaluation).
+
+---
+
+# 4 — Validation & Preview (client-side checks)
+
+APIs to validate a coupon/promotion for a given context (cart-like context passed in; does not modify cart or order).
+
+* `POST /v1/promotions/validate`
+  Validate coupon code(s) or campaign applicability. Body:
+
+  ```json
+  {
+    "codes":["SUMMER10","WELCOME"], 
+    "context": {
+      "user_id":"u123","currency":"GBP","items":[{"sku":"S1","quantity":2,"price":49.95}], "shipping_country":"GB", "channel":"web"
+    },
+    "options":{"explain":true,"simulate_best_combination":true}
+  }
+  ```
+
+  Response: for each code returns `valid:true|false`, `reasons`, `applied_discount` (preview amount), and `explain` for rule matches & conflicts.
+
+* `POST /v1/promotions/preview`
+  Compute full preview of combined promotions for multiple items: returns per-item adjustments, stacking info, and final total. (Useful for UI: "You saved £X").
+
+* `POST /v1/promotions/eligibility/check`
+  Evaluate eligibility only (boolean + matched rules) for a given user/context.
+
+Notes: these endpoints must be idempotent and side-effect free.
+
+---
+
+# 5 — Redemption (apply coupon / voucher -> create redemption record)
+
+Redemption endpoint records that coupon has been consumed (ties to orders but service only records redemption and enforces limits).
+
+* `POST /v1/promotions/redemptions`
+  Create a redemption (atomic attempt to redeem). Body:
+
+  ```json
+  {
+    "coupon_code":"SUMMER10",
+    "user_id":"u123",
+    "reference_type":"order|checkout|gift|manual",
+    "reference_id":"order_789",           // optional (recommended)
+    "context": { "channel":"web", "currency":"GBP", "items":[...] },
+    "metadata": {}
+  }
+  ```
+
+  Behavior: validate eligibility, enforce `per_customer_limit` and `max_uses`, reserve or decrement remaining uses, create redemption record. Response: `201` with `{ "redemption_id","status":"success|failed|partial","discount_amount":12.34,"explain":[...] }`. Should be atomic and return meaningful failure reasons (expired, limit\_reached, not\_eligible, blacklisted).
+
+* `GET /v1/promotions/redemptions/{redemptionId}`
+
+* `GET /v1/promotions/coupons/{couponId}/redemptions`
+  List redemptions for a coupon.
+
+* `POST /v1/promotions/redemptions/{redemptionId}/void`
+  Void/cancel a redemption (used for order cancellations/refunds). Body: `{ "reason":"order_cancelled" }` → releases usage counts.
+
+* `POST /v1/promotions/redemptions/bulk`
+  Bulk redemption (async job) — used by 3rd-party systems or offline processes; returns job id.
+
+Important: redemption should be idempotent (support idempotency-key / client-provided `redemption_client_id`).
+
+---
+
+# 6 — Limits, quotas & throttling controls
+
+Control how many times a coupon can be used (global, per-customer, per-channel, per-time-window).
+
+* `GET /v1/promotions/limits`
+  Show effective limits for coupon/campaign (e.g., `max_uses`, `per_customer_limit`, `per_channel_limit`, `daily_cap`).
+
+* `POST /v1/promotions/limits` / `PATCH` / `DELETE` — manage limits at coupon or campaign level.
+
+* `POST /v1/promotions/limits/check`
+  Quick check whether a redemption would exceed any applicable limits (fast path for checkout flows).
+
+---
+
+# 7 — Targeting & segmentation (audiences)
+
+Manage customer segmentation and targeting used by promotions.
+
+* `GET /v1/promotions/segments`
+  List saved segments (e.g., `vip_customers`, `abandoned_carts_7d`).
+
+* `POST /v1/promotions/segments`
+  Create a segment: `{ "name":"vip","definition":{"lifetime_spend":{"gte":1000}} }`
+
+* `POST /v1/promotions/segments/{segmentId}/evaluate`
+  Evaluate whether a given user\_id belongs (returns boolean + reason).
+
+* `POST /v1/promotions/segments/bulk-evaluate` — bulk membership check.
+
+---
+
+# 8 — Scheduling, activation & lifecycle
+
+Manage when promotions become active, scheduling windows and auto-expiry.
+
+* `POST /v1/promotions/schedule`
+  Create a schedule for campaign or coupon activation (cron or calendar). Body: `{ "target":"campaign|coupon|rule","target_id":"...","start":"...","end":"...","recurrence":"cron(...)" }`
+
+* `GET /v1/promotions/schedule/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/promotions/schedule/{id}/run` — manual trigger.
+
+---
+
+# 9 — Channels & creatives (where & how promotions display)
+
+Map promos to channels and deliver creative assets or messages.
+
+* `GET /v1/promotions/channels`
+  List channels (web, email, app, POS, affiliate).
+
+* `POST /v1/promotions/campaigns/{campaignId}/creatives`
+  Attach creative content (banner copy, email subject, deep-link) to the campaign. Return creative id.
+
+* `GET /v1/promotions/campaigns/{campaignId}/creatives` / `DELETE`
+
+---
+
+# 10 — Experiments & A/B testing
+
+Run experiments to measure lift and control traffic allocation.
+
+* `POST /v1/promotions/experiments`
+  Create experiment: `{ "name":"coupon_A_vs_B","variants":[{"id":"A","coupon_id":"cA"},{"id":"B","coupon_id":"cB"}],"allocation":[50,50],"start":"...","end":"...","metrics":["redeem_rate","revenue_lift"] }`
+
+* `GET /v1/promotions/experiments/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/promotions/experiments/{id}/assign`
+  Force-assign user/session to variant for QA.
+
+* `GET /v1/promotions/experiments/{id}/results`
+  Return KPIs, confidence intervals and recommendation.
+
+---
+
+# 11 — Analytics, reporting & KPIs
+
+Usage, redemption rates, lift, top coders, fraud signals.
+
+* `GET /v1/promotions/analytics/overview`
+  Tenant-level KPIs: `total_redemptions`, `redeem_rate`, `revenue_impact`, `top_coupons`, `fraud_suspicions` within time range.
+
+* `POST /v1/promotions/analytics/query`
+  Ad-hoc analytics DSL (filters, group\_by, aggregations). Example: top coupons by revenue in last 7 days.
+
+* `GET /v1/promotions/coupons/{couponId}/metrics`
+  Time-series metrics for coupon: redemptions/day, revenue, conversion.
+
+* `GET /v1/promotions/reports/exports`
+  Trigger export of analytics to S3/CSV/Parquet. Returns job id.
+
+---
+
+# 12 — Fraud detection & rules
+
+APIs to detect abusive coupon patterns and blacklist offenders.
+
+* `POST /v1/promotions/fraud/score`
+  Submit activity for scoring (e.g., many redemptions from same IP): returns risk score and recommended action.
+
+* `POST /v1/promotions/fraud/blacklist`
+  Blacklist user\_id/email/IP from redeeming or receiving coupons.
+
+* `GET /v1/promotions/fraud/alerts` — list flagged alerts.
+
+---
+
+# 13 — Bulk operations, import & export
+
+Large-scale coupon imports, coupon-to-campaign mapping, and backfills.
+
+* `POST /v1/promotions/imports`
+  Start import job (CSV/NDJSON/S3). Body: `{ "source":"s3://...","mode":"upsert|replace","mapping":{...},"campaign_id":"camp_1" }` → returns job id.
+
+* `GET /v1/promotions/imports/{jobId}` — status & errors.
+
+* `POST /v1/promotions/exports`
+  Export coupons/campaigns/redemptions to storage. Returns job id.
+
+* `POST /v1/promotions/coupons/bulk-revoke`
+  Bulk revoke matching coupons (async).
+
+---
+
+# 14 — Webhooks & events
+
+Notify other systems about creation/activation/redemption/expiry.
+
+* `GET /v1/promotions/webhooks`
+
+* `POST /v1/promotions/webhooks` `{ "url":"https://...","events":["coupon.created","coupon.redeemed","campaign.activated","redemption.voided"],"secret":"..." }` → returns webhook id.
+
+* `DELETE /v1/promotions/webhooks/{id}`
+
+* `POST /v1/promotions/webhooks/test` — send test payload.
+
+Event payloads include before/after snapshots and correlation ids.
+
+---
+
+# 15 — Audit, compliance & retention
+
+Track who changed campaigns, code generation, redemptions & disputes.
+
+* `GET /v1/promotions/audit`
+  Query audit events by actor, action, target\_id, date range.
+
+* `GET /v1/promotions/audit/{eventId}`
+
+* `POST /v1/promotions/retention/policy`
+  Define how long redemption logs and coupon codes are retained.
+
+---
+
+# 16 — Testing & sandbox endpoints
+
+For QA and safe promo testing.
+
+* `POST /v1/promotions/test/validate`
+  Validate coupon/template in sandbox (no usage increments).
+
+* `POST /v1/promotions/test/preview`
+  Preview combined promo application across sample orders.
+
+* `POST /v1/promotions/test/generate`
+  Generate test codes without consuming real max\_uses.
+
+---
+
+# 17 — Security, keys & rate-limits
+
+Keys for storefront validation and admin keys for issuance.
+
+* `GET /v1/promotions/keys`
+
+* `POST /v1/promotions/keys` `{ "name":"storefront-validate","scopes":["validate"], "expires_in":"30d" }` → returns key.
+
+* `DELETE /v1/promotions/keys/{keyId}`
+
+* `GET /v1/promotions/rate-limits` — show per-key/tenant rate limits and usage.
+
+---
+
+# Example resource shapes (canonical)
+
+Coupon resource (abridged):
+
+```json
+{
+  "id":"coupon_0001",
+  "code":"SUMMER10",
+  "type":"percentage",
+  "value":10,
+  "currency":"GBP",
+  "campaign_id":"camp_123",
+  "status":"active",            // draft|active|expired|revoked
+  "max_uses":1000,
+  "uses_count": 123,
+  "per_customer_limit":1,
+  "valid_from":"2025-08-01T00:00:00Z",
+  "valid_until":"2025-09-01T00:00:00Z",
+  "applicability":{"include_products":["sku1"],"exclude_categories":["clearance"]},
+  "metadata":{},
+  "created_at":"2025-08-01T09:00:00Z"
+}
+```
+
+Redemption resource:
+
+```json
+{
+  "id":"red_987",
+  "coupon_code":"SUMMER10",
+  "coupon_id":"coupon_0001",
+  "user_id":"user_42",
+  "reference_type":"order",
+  "reference_id":"order_1001",
+  "discount_amount":12.34,
+  "status":"success",      // success|failed|voided|pending
+  "failure_reason": null,
+  "created_at":"2025-08-29T12:34:56Z"
+}
+```
+
+Rule evaluation response (from validate/preview):
+
+```json
+{
+ "code":"SUMMER10",
+ "valid":false,
+ "reasons":["expired","min_cart_value_not_met"],
+ "explain":[ {"rule_id":"r_1","matched":false,"clause":"cart_total >= 50","detail":"cart_total=32.5"} ]
+}
+```
+
+---
+
+# Design considerations & best practices (short)
+
+* **Separation of concerns**: Promotions service stores definitions, coupons, limits and enforces redemption — it *does not* adjust orders/payments. Checkout should call `validate` then `redemptions` (or use `compute` on pricing service) and then confirm redemptions upon order capture. Use idempotency keys to avoid double-redemption.
+* **Atomic redemptions**: Redemption operation must be atomic (check eligibility, decrement counters, create redemption record) to avoid overspend. Use optimistic concurrency or DB transactions with strong constraints.
+* **Fast validation path**: Provide a lightweight `lookup`/`validate` endpoint optimized for storefronts with cacheable outputs and short TTLs. Heavy `preview` with explainability can be slower.
+* **Rules compilation & pre-evaluation**: Compile DSL rules to optimized artifacts and pre-evaluate static parts (e.g., store-hour restrictions) to keep runtime latency low.
+* **Rate-limits & anti-fraud**: Throttle validation/redemption endpoints and integrate fraud scoring to detect mass coupon abuse. Provide blacklists and device/IP quarantine.
+* **Bulk workflows**: Support large code generations and imports as async jobs with error reports and dry-run validation.
+* **Observability & KPIs**: Expose redeem rate, revenue impact, usage by channel and top codes to product & marketing. Track anomalies and budget/ROI.
+* **Testing & sandbox**: Provide sandbox/test codes and dry-run endpoints for marketing teams.
+* **Security**: Read-only keys for storefront validation; write keys for admin operations with short TTLs and rotation. Log and audit every activation/redemption.
+* **Compliance & retention**: Retain redemption and audit logs long enough for disputes and regulatory needs; provide takedown and redaction flows if necessary.
+
+---
+
+If you want, next I can:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`/coupons`, `/validate`, `/redemptions`, `/campaigns`, `/import`),
+* produce detailed **JSON schemas** for `validate` / `redemptions` / `coupon` request & response shapes (with idempotency examples),
+* or design an **atomic redemption algorithm** (pseudocode + DB schema + race-handling strategies) for high-concurrency checkout traffic.
+
+Which would you like me to produce now?

@@ -1,0 +1,334 @@
+Nice — below is a comprehensive, focused REST API surface for a **Search & Indexing service** suitable for a large eCommerce platform. It contains only endpoints that belong to search/indexing concerns (index management, document ingestion, search/query, analyzers, ingest pipelines, reindexing, backups/snapshots, monitoring, usage/metrics, connectors/imports, and admin). I avoid anything about products, carts, orders, stock, users, payments, etc. — those belong to their own services.
+
+Base conventions (applies across endpoints)
+
+* Base path: `https://api.example.com/v1/search`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT) or API keys for service-to-service.
+* Content type: `application/json`. For bulk/import endpoints `multipart/form-data` or NDJSON accepted.
+* Pagination: `page`/`limit` for simple lists, and for deep-search use `search_after`, `pit_id` (Point-in-Time), `cursor`, or `scroll_id`.
+* Common HTTP responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `500 Internal Server Error`.
+* Multi-tenant support: `X-Tenant-ID` header or tenant scoped paths (e.g. `/v1/search/tenants/{tenantId}/...`) — examples below assume tenant-scoped where needed.
+
+# 1. Index / Index-template / Alias Management
+
+These endpoints manage indexes, mappings, aliases, and lifecycle.
+
+* `GET /v1/search/indices`
+  Purpose: List indices (filterable by pattern, tenant, status).
+  Query: `pattern`, `alias`, `state=open|closed|all`, `page`, `limit`.
+  Response: list with index name, docs\_count, size, mappings, settings.
+
+* `POST /v1/search/indices`
+  Purpose: Create an index.
+  Body: `{ "name": "products_v1", "mappings": {...}, "settings": {...}, "aliases": ["products"] }`
+  Response: `201` created with index metadata.
+
+* `GET /v1/search/indices/{indexName}`
+  Purpose: Get index details (mappings, settings, stats, aliases).
+
+* `PATCH /v1/search/indices/{indexName}`
+  Purpose: Update index settings that are dynamic (e.g. refresh\_interval).
+  Body: partial settings changes.
+
+* `DELETE /v1/search/indices/{indexName}`
+  Purpose: Delete index (hard). Query `force=true` to skip safety checks.
+
+* `POST /v1/search/indices/{indexName}/close`
+  Purpose: Close index (free resources).
+
+* `POST /v1/search/indices/{indexName}/open`
+  Purpose: Re-open closed index.
+
+* `GET /v1/search/aliases`
+  Purpose: List aliases and which index each points to. Query `alias` or `index`.
+
+* `POST /v1/search/aliases`
+  Purpose: Create/update aliases atomically. Body example: `{ "actions":[{"add":{"index":"products_v2","alias":"products"}},{"remove":{"index":"products_v1","alias":"products"}}] }`
+
+* `DELETE /v1/search/aliases/{aliasName}`
+  Purpose: Remove alias (optionally restrict index).
+
+* `GET /v1/search/templates`
+  Purpose: List index templates / index patterns.
+
+* `POST /v1/search/templates`
+  Purpose: Create an index template / index lifecycle policy. Body: `{ "name":"products-template","template":{...},"lifecycle":{...} }`
+
+* `GET /v1/search/indices/{indexName}/mappings`
+  Purpose: Get field mappings/schema.
+
+* `PUT /v1/search/indices/{indexName}/mappings`
+  Purpose: Add mapping fields (non-breaking updates). Body: mapping additions.
+
+# 2. Document / CRUD / Versioning
+
+Endpoints for document-level operations (the service stores indexed documents used by search).
+
+* `POST /v1/search/indices/{indexName}/documents`
+  Purpose: Index a single document (create or overwrite).
+  Body: document JSON (must include unique `id` or use auto-generated id). Query params: `op_type=create|index`, `refresh=wait_for|true|false`.
+  Response: `201`/`200` with `_id`, `_version`.
+
+* `PUT /v1/search/indices/{indexName}/documents/{documentId}`
+  Purpose: Create/replace document by id. Body: document JSON.
+
+* `GET /v1/search/indices/{indexName}/documents/{documentId}`
+  Purpose: Retrieve the stored document and index metadata (source, metadata, version).
+
+* `PATCH /v1/search/indices/{indexName}/documents/{documentId}`
+  Purpose: Partial document update (merge or scripted update). Body: partial fields or script.
+
+* `DELETE /v1/search/indices/{indexName}/documents/{documentId}`
+  Purpose: Delete document.
+
+* `GET /v1/search/indices/{indexName}/documents/{documentId}/_explain?q=...`
+  Purpose: Explain scoring for how a query would score this doc.
+
+* `GET /v1/search/indices/{indexName}/documents/_mget`
+  Purpose: Multi-get documents by ids. Body: `{ "ids": ["1","2","3"] }`
+
+# 3. Bulk ingestion & batch APIs
+
+High-throughput endpoints for batch indexing.
+
+* `POST /v1/search/indices/{indexName}/bulk`
+  Purpose: Bulk indexing and delete in NDJSON or JSON array. Accepts NDJSON body (action + doc). Query: `refresh`, `pipeline` (ingest pipeline).
+  Response: per-item results with errors; use `202 Accepted` or `200 OK`.
+
+* `POST /v1/search/indices/{indexName}/bulk/upload` (multipart)
+  Purpose: Upload large NDJSON file for background processing (returns job id). Body: file.
+
+* `GET /v1/search/bulk/jobs/{jobId}`
+  Purpose: Check status of async bulk job (progress, errors).
+
+# 4. Search endpoints (queries, DSL, suggestions, facets)
+
+Search endpoints allow simple & advanced queries, faceting/aggregations, paging, highlighting, and point-in-time searches.
+
+* `GET /v1/search/query`
+  Purpose: Simple GET search across default scope (supports `q` param, `index`, `size`, `from`, `sort`, `fields`).
+  Example: `/v1/search/query?index=products&q=wireless+headphones&size=20&sort=price:asc`
+
+* `POST /v1/search/query`
+  Purpose: Full JSON DSL search for complex queries and aggregations. Body: `{ "indices":["products"], "query":{...}, "aggs":{...}, "size":20, "from":0, "highlight":{...}, "sort":[...] }`
+  Response: `hits`, `aggregations`, `took`, `timed_out`.
+
+* `POST /v1/search/query/stream`
+  Purpose: Stream large result sets as NDJSON for ingestion into other services (supports `scroll` or cursor).
+
+* `POST /v1/search/query/pit`
+  Purpose: Open a Point-In-Time (PIT) for consistent paging. Body: `{ "indices":["products"], "keep_alive":"1m" }` → returns `pit_id`.
+
+* `POST /v1/search/query/close-pit`
+  Purpose: Close PIT: `{ "pit_id":"..." }`.
+
+* `GET /v1/search/scroll/{scrollId}`
+  Purpose: Continue/consume a scroll search (legacy but sometimes required for very large exports).
+
+* `POST /v1/search/autocomplete`
+  Purpose: Autocomplete / prefix search endpoint optimized for low-latency suggestions. Body: `{ "index":"products","field":"suggest","prefix":"iph","size":10 }`
+  Response: suggestion entries with score & payload.
+
+* `POST /v1/search/suggest`
+  Purpose: Multi-suggester endpoint (completion, phrase suggester, term suggester). Body: DSL.
+
+* `POST /v1/search/facets`
+  Purpose: Return faceted counts for filters (often used with `query`).
+
+* `POST /v1/search/multi`
+  Purpose: Multi-index multi-query batch search (execute several queries in one request and return grouped results).
+
+* `POST /v1/search/scroll/export`
+  Purpose: Export full query result set to S3/GCS/zip (async job). Body: query + export destination; returns job id.
+
+# 5. Reindexing, backfills & async index jobs
+
+Reindex and background maintenance tasks.
+
+* `POST /v1/search/reindex`
+  Purpose: Reindex data between indices or apply mapping changes. Body: `{ "source": "products_v1", "dest":"products_v2", "query": {...}, "script": {...}, "pipeline":"ingest_pipeline" }`
+  Response: `202` with job id.
+
+* `GET /v1/search/reindex/jobs/{jobId}`
+  Purpose: Check progress, errors, stats.
+
+* `POST /v1/search/indices/{indexName}/refresh`
+  Purpose: Force index refresh (expose recent changes).
+
+* `POST /v1/search/indices/{indexName}/optimize`
+  Purpose: Force merge/optimize segments (careful—heavy op). Response async.
+
+* `POST /v1/search/indices/{indexName}/rollover`
+  Purpose: Rollover index pattern based on size/doc count/age (used with aliases).
+
+# 6. Ingest Pipelines / Tokenizers / Analyzers / Synonyms
+
+Manage ingest-time processing, analyzers, and query-time behavior.
+
+* `GET /v1/search/ingest/pipelines`
+  Purpose: List configured ingest pipelines.
+
+* `POST /v1/search/ingest/pipelines`
+  Purpose: Create pipeline. Body: `{ "name":"product-parse","processors":[{ "grok":{...} },{"set":{...}}] }`
+
+* `GET /v1/search/ingest/pipelines/{pipelineId}`
+
+* `PUT /v1/search/ingest/pipelines/{pipelineId}`
+
+* `DELETE /v1/search/ingest/pipelines/{pipelineId}`
+
+* `GET /v1/search/analyzers`
+  Purpose: List available/analyzer presets and custom tokenizers.
+
+* `POST /v1/search/analyzers`
+  Purpose: Create custom analyzer (tokenizer, filters). Body: `{ "name":"autocomplete_icu", "type":"custom", "tokenizer":"ngram", "filters":["lowercase","asciifolding"] }`
+
+* `GET /v1/search/synonyms`
+  Purpose: List synonym sets.
+
+* `POST /v1/search/synonyms`
+  Purpose: Create/update synonyms. Body: `{ "id":"color_synonyms", "synonyms":["red, crimson", "tv, television"] }` Query: `apply_to_indices=["products"]` to push refresh.
+
+* `POST /v1/search/analyzers/test`
+  Purpose: Test analyzer/tokenization on sample text. Body: `{ "analyzer":"autocomplete_icu","text":"Samsung TV 55 inch" }` → tokens.
+
+# 7. Connectors & Data Import
+
+Connectors import data from external sources (S3, DB, message queues, product service feed).
+
+* `GET /v1/search/connectors`
+  Purpose: List active connectors.
+
+* `POST /v1/search/connectors`
+  Purpose: Create connector. Body: `{ "type":"s3|product-service-rpc|kafka|mysql|csv_url", "config": {...}, "index":"products", "schedule":"cron or webhook" }`
+  Response: `201` connector id.
+
+* `GET /v1/search/connectors/{connectorId}`
+  Purpose: Connector details, last run, errors.
+
+* `POST /v1/search/connectors/{connectorId}/run`
+  Purpose: Trigger immediate sync (manual run).
+
+* `DELETE /v1/search/connectors/{connectorId}`
+
+* `GET /v1/search/connectors/{connectorId}/logs`
+  Purpose: Access connector job logs.
+
+# 8. Snapshots / Backups / Restore
+
+Index snapshotting for disaster recovery.
+
+* `GET /v1/search/snapshots`
+  Purpose: List snapshots for cluster/tenant.
+
+* `POST /v1/search/snapshots`
+  Purpose: Create snapshot. Body: `{ "repository":"s3://bucket/path", "indices":["products*"], "name":"snap-2025-08-29" }`
+  Response: `202` job id.
+
+* `GET /v1/search/snapshots/{snapshotId}`
+  Purpose: Snapshot status.
+
+* `POST /v1/search/snapshots/{snapshotId}/restore`
+  Purpose: Restore snapshot to indices (rename pattern allowed).
+
+* `DELETE /v1/search/snapshots/{snapshotId}`
+
+# 9. Security / Access / API Keys / Rate-limits
+
+Search service-specific access control (index-level roles, API key management).
+
+* `GET /v1/search/keys`
+  Purpose: List API keys scoped to search (filter by index). Returns hashed keys and privileges.
+
+* `POST /v1/search/keys`
+  Purpose: Issue API key for read-only/search or write scope. Body: `{ "name":"product-search-key","indices":["products"], "privileges":["search","suggest"], "expires_in":"30d" }`
+  Response: plaintext `api_key` (store client-side).
+
+* `DELETE /v1/search/keys/{keyId}`
+
+* `GET /v1/search/permissions/indices/{indexName}`
+  Purpose: List effective privileges for caller on a given index.
+
+* `GET /v1/search/rate-limits`
+  Purpose: Show per-key or per-tenant throttling usage and limits.
+
+# 10. Monitoring / Stats / Health
+
+Operational endpoints for metrics and health of search cluster.
+
+* `GET /v1/search/health`
+  Purpose: Overall search subsystem health (green/yellow/red). Also returns node count, cluster status.
+
+* `GET /v1/search/stats`
+  Purpose: Query throughput & latency metrics (qps, avg\_latency\_ms, error\_rate) — support `range` query.
+
+* `GET /v1/search/indices/{indexName}/stats`
+  Purpose: Per-index docs count, segments, merge times, query latency.
+
+* `GET /v1/search/metrics/slowlogs`
+  Purpose: Retrieve slow query logs and top offenders.
+
+* `GET /v1/search/audit/logs`
+  Purpose: Audit of search actions (who executed what queries), retention controlled for PII.
+
+# 11. Events / Webhooks
+
+Emit events when reindex/job completes or connector run fails.
+
+* `GET /v1/search/webhooks`
+* `POST /v1/search/webhooks` `{ "url":"https://...", "events":["reindex.completed","connector.failed","snapshot.completed"], "secret":"..." }`
+* `DELETE /v1/search/webhooks/{id}`
+
+# 12. Utilities & Developer Endpoints
+
+Helpers for debugging and integration.
+
+* `POST /v1/search/explain`
+  Purpose: Take query + doc and return match/highlighting + score breakdown.
+
+* `POST /v1/search/similarity`
+  Purpose: Find similar documents by vector or text (k-NN). Body: `{ "index":"products","doc":{...},"k":10 }` — supports vector fields.
+
+* `POST /v1/search/vector/index`
+  Purpose: Index vector representation (for hybrid vector search). Body: `{ "id":"doc1","vector":[0.1,0.2,...], "metadata":{...} }`
+
+* `POST /v1/search/vector/search`
+  Purpose: Search by vector: `{ "index":"embeddings","vector":[...],"k":10,"filters":{...} }`
+
+* `POST /v1/search/analyze`
+  Purpose: Tokenize sample text with a specified analyzer; helpful for debugging analyzers/synonyms.
+
+* `GET /v1/search/capabilities`
+  Purpose: Returns enabled features for tenant: `{"suggest","vector_search","synonyms","ingest_pipelines","reindexing"}`
+
+# 13. Tenant / Quota / Billing integration
+
+Search-specific usage & quotas.
+
+* `GET /v1/search/usage`
+  Purpose: Tenant storage used by indices, monthly search requests, bulk operations used.
+
+* `GET /v1/search/quotas`
+  Purpose: Quotas (max indices, max docs, max storage, max qps). Admin can `PATCH` quotas.
+
+# Design & implementation considerations (short)
+
+* **Separation of concerns**: keep indexing, ingestion, connectors, and query-serving separate modules — expose async job endpoints for heavy ops (reindex, bulk upload, optimization).
+* **Consistency for paging**: prefer `search_after` or PIT over `from`/`from+size` for deep pagination. Offer cursors for client convenience.
+* **Low-latency suggesters**: keep a separate optimized data structure (completion or k-d tree) for suggestions/autocomplete.
+* **Schema evolution**: support add-only mappings and provide reindex workflows via `reindex` endpoint.
+* **Synonyms & analyzers**: changes may require index reindex or alias swap; provide hot-reload where possible and clear admin APIs.
+* **Vector & hybrid search**: provide vector-index endpoints and storage for embeddings, with k-NN query endpoints and filterable metadata.
+* **Security**: allow short-lived API keys for read/search usage embedded in storefronts; restrict write/index keys to backend. Rate-limit and monitor per-key usage.
+* **Observability**: surface slow query logs, top aggregations cost, and per-index query latencies to guide schema tuning.
+* **Backups**: expose snapshot/restore for disaster recovery and CI/CD reindex snapshots.
+
+---
+
+If you want next, I can:
+
+* produce an OpenAPI skeleton for the most used endpoints (search, bulk, indices, reindex),
+* design JSON request/response schemas for search and bulk ingestion,
+* or generate example client calls (Node/Go/Python) for indexing + search + reindex workflows.
+
+Which of those should I produce now?

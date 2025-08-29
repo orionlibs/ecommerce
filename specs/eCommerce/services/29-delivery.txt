@@ -1,0 +1,378 @@
+# Last-Mile Orchestration & Delivery Partner Service — REST API surface
+
+Nice — below is a comprehensive, focused REST API design for a **Last-Mile Orchestration & Delivery Partner** service. This service coordinates delivery partners (3PLs, crowd couriers, own fleet), assigns deliveries to drivers/vehicles, optimizes routes, tracks live status, collects proofs-of-delivery, manages exceptions & returns pickups, and provides partner APIs & telemetry for operational teams. It **only** includes endpoints relevant to last-mile orchestration (no payments, order creation, inventory, or fulfillment internals — those are referenced by id like `order_id`, `fulfillment_id`, `package_id`).
+
+---
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/lastmile` (tenant via `X-Tenant-ID` header or tenant prefix).
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Partner apps may use scoped API keys or OAuth client credentials.
+* Content-Type: `application/json`. Binary uploads (POD photos, signatures) via presigned URLs.
+* Idempotency: mutating endpoints accept `Idempotency-Key`.
+* Concurrency: use `If-Match` / `ETag` or `version` where relevant.
+* Pagination: cursor + `limit`.
+* Time: RFC3339.
+* Geo: use WGS84 lat/lon. `location: { lat, lon, accuracy_meters, timestamp }`.
+* Responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`.
+* Real-time: support WebSocket / SSE endpoints for driver live locations and assignment pushes.
+
+---
+
+# 1 — Delivery requests (create / query / cancel)
+
+Canonical resource tying an order/fulfillment/package to a last-mile job.
+
+* `POST /v1/lastmile/deliveries`
+  Create delivery job(s). Body example:
+
+  ```json
+  {
+    "source":"fulfillment_service",
+    "source_id":"ful_123",
+    "order_id":"ord_456",       // optional reference
+    "packages":[ { "package_id":"pkg_1", "weight":1200 } ],
+    "pickup": { "address":{...}, "window":{ "from":"...", "to":"..." } },
+    "dropoff": { "address":{...}, "recipient":{ "name","phone" } },
+    "service_level":"standard|express|same_day",
+    "priority":"high|normal",
+    "metadata": {}
+  }
+  ```
+
+  Returns `201` with `delivery_id`, `status: requested|scheduled|assigned|enroute|delivered|cancelled|failed`.
+
+* `GET /v1/lastmile/deliveries/{deliveryId}` — full delivery record, assignments, telemetry, timeline.
+
+* `GET /v1/lastmile/deliveries` — list / filter by `status`, `driver_id`, `partner_id`, `from/to`, `service_level`, `area`.
+
+* `PATCH /v1/lastmile/deliveries/{deliveryId}` — update pickup/dropoff windows, contact, metadata (allowed only in modifiable statuses).
+
+* `POST /v1/lastmile/deliveries/{deliveryId}/cancel` — cancel delivery (reason, refund\_hint) — returns whether cancellation succeeded and any reconcile actions required.
+
+* `POST /v1/lastmile/deliveries/bulk` — bulk create deliveries (NDJSON or S3 pointer) → async job id.
+
+* `POST /v1/lastmile/deliveries/{deliveryId}/reschedule` — change scheduled slot.
+
+---
+
+# 2 — Partner & carrier integration (onboarding & config)
+
+Manage delivery partners (3PLs, crowdsourced fleets) and per-partner capabilities.
+
+* `GET /v1/lastmile/partners`
+
+* `POST /v1/lastmile/partners` — register partner: `{ name, type:"3pl|crowd|ownfleet", capabilities:["ondemand","scheduled","returns","cold_chain"], contact, metadata }`.
+
+* `GET /v1/lastmile/partners/{partnerId}` / `PATCH` / `DELETE` (soft disable only).
+
+* `POST /v1/lastmile/partners/{partnerId}/credentials` — store connector credentials (encrypted), test connection.
+
+* `GET /v1/lastmile/partners/{partnerId}/capabilities` — list supported services, geographies, vehicle types.
+
+* `POST /v1/lastmile/partners/{partnerId}/rates/test` — test-rate or price quote for sample route.
+
+* `GET /v1/lastmile/partners/{partnerId}/performance` — SLAs, on-time %, missed pickups.
+
+Notes: connectors are pluggable adapters — keep raw partner responses for audit.
+
+---
+
+# 3 — Drivers / couriers / agents
+
+Register and manage drivers (users of mobile app or partner drivers) and their status.
+
+* `POST /v1/lastmile/drivers` — create driver profile: `{ partner_id, external_driver_id, name, phone, vehicle_id, skills:["fragile","cold"], documents:[doc_ids], metadata }`.
+
+* `GET /v1/lastmile/drivers/{driverId}` / `PATCH` / `DELETE` (deactivate).
+
+* `GET /v1/lastmile/drivers?partner_id=...&status=...` — list drivers.
+
+* `POST /v1/lastmile/drivers/{driverId}/status` — update availability/status: `{ status:"available|offline|on_shift|break", location:{...} }`.
+
+* `POST /v1/lastmile/drivers/{driverId}/assign` — admin/auto assign delivery(s) to driver (idempotent).
+
+* `POST /v1/lastmile/drivers/{driverId}/unassign` — unassign or force reassign.
+
+* `POST /v1/lastmile/drivers/{driverId}/documents` — upload ID, license, insurance (presigned URL pattern).
+
+* `GET /v1/lastmile/drivers/{driverId}/work` — list current/past assigned deliveries.
+
+* `POST /v1/lastmile/drivers/{driverId}/impersonate-token` — generate short-lived token for driver app (audit required).
+
+---
+
+# 4 — Vehicles & assets
+
+Manage vehicles used for deliveries (for capacity, routing and constraints).
+
+* `POST /v1/lastmile/vehicles` — create vehicle: `{ partner_id, vehicle_id, type: "bike|car|van|truck", capacity:{weight,volume}, dimensions, registration, metadata }`.
+
+* `GET /v1/lastmile/vehicles/{vehicleId}` / `PATCH` / `DELETE`.
+
+* `GET /v1/lastmile/vehicles?warehouse=...&available=true` — list.
+
+---
+
+# 5 — Assignment & routing (optimizer)
+
+Core orchestration: pool matching, automated assignment, dynamic re-optimization, multi-stop route building.
+
+* `POST /v1/lastmile/assignments/auto`
+  Auto-assign deliveries to partners/drivers. Body: `{ delivery_ids:[...], constraints:{max_stops_per_route, vehicle_type}, strategy:"latency|cost|balanced", time_window_policy }` → returns assignment plan job id or immediate assignments.
+
+* `POST /v1/lastmile/assignments/{assignmentJobId}/cancel` — cancel assignment job.
+
+* `GET /v1/lastmile/assignments/{assignmentId}` — get assignment details (driver, vehicle, route).
+
+* `POST /v1/lastmile/assignments/{assignmentId}/replan` — re-run route optimizer (for dynamic events or added deliveries).
+
+* `POST /v1/lastmile/assignments/{assignmentId}/lock` — lock assignment to prevent auto-changes.
+
+* `POST /v1/lastmile/assignments/{assignmentId}/push-to-driver` — push assignment to driver (via push or partner API).
+
+* `POST /v1/lastmile/assignments/bulk-unassign` — bulk unassign (for mass reroutes).
+
+Routing features:
+
+* `POST /v1/lastmile/optimizer/preview` — preview route plan w/o committing (returns ETA, cost, distance, stops order).
+* `POST /v1/lastmile/optimizer/options` — return alternate route choices (e.g., fastest vs cheapest).
+* `GET /v1/lastmile/optimizer/status` — queue length, last run times.
+
+Important: optimizer should return `route_id`, `eta_per_stop`, `route_geometry` (polyline), `estimated_distance_m`, and `estimated_time_s`.
+
+---
+
+# 6 — Driver app interactions (mobile SDK server endpoints)
+
+Support driver lifecycle: accept/decline, start/arrive/complete stops, proof capture.
+
+* `POST /v1/lastmile/driver-api/assignments/{assignmentId}/accept` — driver accepts assignment.
+
+* `POST /v1/lastmile/driver-api/assignments/{assignmentId}/decline` — driver declines (reason codes).
+
+* `POST /v1/lastmile/driver-api/assignments/{assignmentId}/start-route` — begin route.
+
+* `POST /v1/lastmile/driver-api/stops/{stopId}/arrive` — driver marks arrival (with location).
+
+* `POST /v1/lastmile/driver-api/stops/{stopId}/attempt` — delivery attempt with `attempt_number`, `notes`.
+
+* `POST /v1/lastmile/driver-api/stops/{stopId}/complete` — successful delivery with POD: `{ status:"delivered", recipient_signature:{url or base64}, photos:[url], timestamp, notes }`.
+
+* `POST /v1/lastmile/driver-api/stops/{stopId}/failed` — failed delivery: `{ reason:"no_one_home|wrong_address|refused", next_action:"reschedule|return_to_warehouse" }`.
+
+* `POST /v1/lastmile/driver-api/stop/{stopId}/partial` — partial delivery details.
+
+* `POST /v1/lastmile/driver-api/location` — location ping endpoint (batchable) `{ driver_id, location, speed, heading, battery_pct }`.
+
+* `GET /v1/lastmile/driver-api/assignment/{assignmentId}/route` — get route geometry & next-stop.
+
+* `POST /v1/lastmile/driver-api/check-in` / `check-out` — for shift management.
+
+Driver app realtime:
+
+* `GET /v1/lastmile/driver-api/assignments/stream` — SSE or WebSocket subscription for pushed assignments and route updates.
+
+Security: driver endpoints accept tokens with minimal scopes and rate limits; all driver actions must be auditable.
+
+---
+
+# 7 — Proof-of-delivery (POD) & media
+
+Capture signed proof & photos, store via presigned URLs.
+
+* `POST /v1/lastmile/pod/request-upload` — return presigned URL(s) for signature image / photos / documents.
+
+* `POST /v1/lastmile/pod` — register POD record referencing uploaded assets: `{ delivery_id, stop_id, signature_url, photos:[url], notes, delivered_at }`.
+
+* `GET /v1/lastmile/pod/{podId}` — retrieve POD metadata + presigned URLs.
+
+* `GET /v1/lastmile/deliveries/{deliveryId}/pod` — get POD for delivery.
+
+POD must include hash and size for verification.
+
+---
+
+# 8 — Exceptions, retries & reverse logistics
+
+Handle failures, undeliverable items, returns pickups and customer callbacks.
+
+* `POST /v1/lastmile/exceptions` — create an exception manually: `{ delivery_id, type:"address_issue|damaged|driver_issue", notes, severity }`.
+
+* `GET /v1/lastmile/exceptions/{exceptionId}` / list.
+
+* `POST /v1/lastmile/deliveries/{deliveryId}/retry` — request retry with window and special instructions.
+
+* `POST /v1/lastmile/returns/pickup` — schedule return pickup (create a pickup delivery job with `type: return`).
+
+* `POST /v1/lastmile/deliveries/{deliveryId}/escalate` — escalate to support with case\_id, priority.
+
+---
+
+# 9 — Tracking & visibility (customer & ops)
+
+APIs for live tracking and history for customer/ops UIs (read-only flows).
+
+* `GET /v1/lastmile/deliveries/{deliveryId}/live` — canonical live status + driver location + ETA + progress percentage.
+
+* `GET /v1/lastmile/drivers/{driverId}/location` — last known location and timestamp.
+
+* `GET /v1/lastmile/areas/{areaId}/heatmap` — density/active deliveries for ops.
+
+* `GET /v1/lastmile/deliveries/{deliveryId}/timeline` — full timeline of events.
+
+* `GET /v1/lastmile/public/track?tracking_number=...` — lightweight customer-facing tracking page payload (public token or guest lookup).
+
+---
+
+# 10 — Scheduling & window management
+
+Support scheduled deliveries, time windows, SLA adherence.
+
+* `GET /v1/lastmile/slots/availability` — query available delivery slots for address and service level.
+
+* `POST /v1/lastmile/slots/reserve` — reserve slot (returns reservation id with TTL).
+
+* `POST /v1/lastmile/slots/confirm` — confirm reserved slot (idempotent).
+
+* `POST /v1/lastmile/slots/cancel` — cancel reservation.
+
+---
+
+# 11 — Partner API (for partner systems)
+
+APIs designed for delivery partner systems (to pull assignments, post statuses, and sync manifests).
+
+* `GET /v1/lastmile/partner-api/partners/{partnerId}/assignments` — list assignments for partner (since cursor/time).
+
+* `POST /v1/lastmile/partner-api/partners/{partnerId}/assignments/{assignmentId}/status` — partner posts status updates.
+
+* `POST /v1/lastmile/partner-api/partners/{partnerId}/driver-sync` — bulk driver/vehicle sync.
+
+* `POST /v1/lastmile/partner-api/partners/{partnerId}/manifest/upload` — partner uploads pickup manifest.
+
+Use HMAC and per-partner tokens.
+
+---
+
+# 12 — Webhooks & event subscriptions
+
+Emit events to interested systems (fulfillment, orders, CS, billing).
+
+* `GET /v1/lastmile/webhooks`
+
+* `POST /v1/lastmile/webhooks` `{ "url","events":["delivery.created","delivery.assigned","stop.arrived","stop.completed","pod.created","delivery.failed"], "secret" }` → creates subscription.
+
+* `DELETE /v1/lastmile/webhooks/{id}` / `POST /v1/lastmile/webhooks/test`.
+
+All webhooks signed; include `delivery_id`, `assignment_id`, `driver_id`, `timestamp`, and `correlation_id`.
+
+---
+
+# 13 — Jobs, bulk operations & imports
+
+Backfill, import drivers, bulk assignments, replays.
+
+* `POST /v1/lastmile/imports` — NDJSON/S3 import (deliveries, drivers) → returns `job_id`.
+
+* `GET /v1/lastmile/jobs/{jobId}` — status + errors.
+
+* `POST /v1/lastmile/jobs/{jobId}/cancel`
+
+* `POST /v1/lastmile/replay` — replay events to downstream systems or reprocess deliveries for analytics.
+
+---
+
+# 14 — Metrics, SLOs & monitoring
+
+Operational telemetry for ops and SRE.
+
+* `GET /v1/lastmile/metrics` — KPIs: `on_time_delivery_pct`, `avg_time_to_deliver`, `attempts_per_delivery`, `failed_deliveries`, `driver_idle_time`, `route_efficiency` (distance/time ratio).
+
+* `GET /v1/lastmile/alerts` — current SLA breaches, exceptions count.
+
+* `GET /v1/lastmile/health` — subsystem health: optimizer, partner connectors, location ingestion, push-notification service.
+
+---
+
+# 15 — Audit, security & admin
+
+Audit logs, RBAC, keys management and policy configuration.
+
+* `GET /v1/lastmile/audit` — query audit trail (actions: assignment change, cancel, reschedule).
+
+* `GET /v1/lastmile/roles` / `POST /v1/lastmile/roles` — admin roles (ops, dispatcher, viewer).
+
+* `GET /v1/lastmile/keys` / `POST /v1/lastmile/keys` — create scoped API keys for partners/driver apps (plaintext once).
+
+* `GET /v1/lastmile/policies` / `PATCH` — delivery policies (max\_attempts, auto\_return\_after\_attempts, contact\_attempt\_rules).
+
+---
+
+# 16 — Reconciliation & settlements hooks
+
+(References only — actual money flows live in payouts/payment services)
+
+* `GET /v1/lastmile/settlement-refs/{deliveryId}` — retrieve partner settlement reference(s) (to feed payouts/reconciliation systems).
+
+* `POST /v1/lastmile/settlement-refs/{deliveryId}` — attach partner settlement ids (gateway for accounting).
+
+---
+
+# 17 — Real-time & streaming endpoints
+
+For high-frequency location & assignment updates.
+
+* `WS /v1/lastmile/realtime` — WebSocket for driver to receive assignment pushes and stream location updates (auth by driver token).
+
+* `SSE /v1/lastmile/streams/deliveries/{deliveryId}` — subscribe to live delivery events for a single delivery (customer or ops).
+
+---
+
+# 18 — Example Delivery resource (canonical)
+
+```json
+{
+  "id":"dlv_0001",
+  "source":"fulfillment_service",
+  "source_id":"ful_123",
+  "order_id":"ord_456",
+  "status":"assigned",   // requested|scheduled|assigned|enroute|delivered|failed|cancelled|returned
+  "service_level":"same_day",
+  "priority":"normal",
+  "pickup": { "address":{...}, "window": { "from":"2025-09-01T08:00:00Z","to":"2025-09-01T10:00:00Z" } },
+  "dropoff": { "address":{...}, "recipient": {"name":"Jane","phone":"+44..."} },
+  "packages":[ { "package_id":"pkg_1","weight":1200 } ],
+  "assignment": { "assignment_id":"asg_10","driver_id":"drv_4","vehicle_id":"veh_1","route_id":"route_789","eta":"2025-09-01T09:20:00Z" },
+  "created_at":"2025-08-31T10:00:00Z",
+  "updated_at":"2025-08-31T10:15:00Z",
+  "metadata": { "promised_by":"2025-09-01T12:00:00Z" }
+}
+```
+
+---
+
+# 19 — Design considerations & best practices (brief)
+
+* **Orchestration not ownership:** last-mile orchestrator coordinates partners/drivers and keeps canonical delivery job state; partners actually execute. Keep raw partner payloads for audit.
+* **Idempotency & retries:** require `Idempotency-Key`. Partner callbacks and driver app retries are common — make handlers idempotent.
+* **Realtime first for UX:** use WebSocket/SSE for live driver pushes and user tracking, but also persist all events for replay and auditing.
+* **Route planner as a service:** expose optimizer separately (preview + commit) so UIs can show alternatives. Support re-optimization on dynamic events.
+* **Security & least privilege:** driver tokens are short-lived, scoped to driver actions; partner credentials per integration and rotated. All sensitive docs via presigned URLs.
+* **Robust exception model:** represent failures explicitly with codes and suggested remediation (reschedule, retry, escalate). Provide CS tooling for quick reroutes.
+* **Instrument heavily:** route efficiency, ETA accuracy, on-time %, attempts, POD timeliness. Use these metrics for partner SLAs & routing decisions.
+* **POD integrity:** sign/verify signatures, include image hashes, and store proofs with access logs for disputes.
+* **Offline resilience:** driver apps must be able to record events offline and sync later; API must accept backfilled events (with original timestamps) and reconcile.
+* **Privacy:** redact PII in logs for analytics; provide access logs for POD access.
+* **Multi-provider & fallback:** support multiple partner connectors and transparent failover; use routing policy driven by cost, SLA or carbon footprint.
+* **Testing & sandbox:** provide sandbox endpoints to simulate driver events and partner callbacks; ensure sandbox cannot impact production.
+
+---
+
+If you want I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`/deliveries`, `/assignments`, `/driver-api`, `/optimizer/preview`, `/pod`),
+* produce detailed **JSON schemas** for `delivery`, `assignment`, `route` and `pod` resources,
+* or design the **real-time assignment & re-optimization state machine** (sequence diagram + pseudocode + DB schema) that handles dynamic reroutes, driver declines, and compensation/rollback logic.
+
+Which would you like me to produce now?

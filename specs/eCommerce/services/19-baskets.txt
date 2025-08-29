@@ -1,0 +1,351 @@
+# Cart Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for a **Cart Service** that lives inside a large eCommerce platform. It contains *only* endpoints and operations relevant to carts and their immediate concerns: cart lifecycle, line items, promotions applied to carts, coupons, cart totals/preview, cart persistence and sessions, merging/syncing across devices, reservations *delegation* hooks (but not inventory reservation itself), webhooks/events, analytics, and admin/config for carts. I intentionally **do not** include endpoints for orders, payments, inventory/stock levels, product CRUD, pricing engine internals, or checkout execution — those are separate services and should be referenced by id.
+
+Base conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/carts`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT) or short-lived API keys for storefronts. Support anonymous (guest) carts via `cart_token` header or cookie. Tenant via `X-Tenant-ID` header if multi-tenant.
+* Content type: `application/json`. Multipart for attachments if required.
+* Pagination: `page`/`limit` or cursor (`cursor`, `limit`).
+* Standard responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `429 Too Many Requests`, `500 Server Error`.
+* Idempotency: mutation endpoints should accept `Idempotency-Key`.
+* Concurrency: support ETag / `If-Match` (version) or optimistic `version` field on cart to avoid lost updates.
+
+---
+
+# 1 — Cart lifecycle (create / read / update / delete)
+
+Core endpoints to create, retrieve, update and delete carts.
+
+* `POST /v1/carts`
+  Purpose: Create a cart (guest or user-scoped). Body (example):
+
+  ```json
+  { 
+    "owner": { "type":"user|guest","id":"user_123" }, 
+    "currency":"GBP",
+    "channel":"web",
+    "locale":"en-GB",
+    "metadata": { "session_id":"s_abc" }
+  }
+  ```
+
+  Response: `201` with cart object containing `id`, `cart_token` (for guest), `created_at`, `version`.
+
+* `GET /v1/carts/{cartId}`
+  Purpose: Retrieve full cart (lines, totals preview if cached, applied coupons, metadata). Query: `expand=totals,prices,applied_promotions`.
+
+* `PATCH /v1/carts/{cartId}`
+  Purpose: Partial update (metadata, shipping address, currency, channel). Use `If-Match` / `version` to avoid conflicts.
+
+* `DELETE /v1/carts/{cartId}`
+  Purpose: Soft-delete or purge cart. Query `hard=true` for permanent removal. Response: `204`.
+
+* `GET /v1/carts`
+  Purpose: List carts for current actor/admin (filter by `owner.id`, `status=active|abandoned|converted|archived`, `updated_after`). Admin only sees all tenant carts.
+
+* `POST /v1/carts/{cartId}/archive` / `/unarchive` — mark stored carts as archived.
+
+---
+
+# 2 — Line items (add / update / remove / batch)
+
+Operations to manage items inside a cart. Each line references `sku`/`product_id`/`variant_id` and includes quantity, attributes and optional client-side price hints.
+
+* `POST /v1/carts/{cartId}/lines`
+  Purpose: Add a line item (idempotent via client-provided `client_line_id`). Body:
+
+  ```json
+  { 
+    "client_line_id":"cl-123",
+    "sku":"SKU-1","variant_id":"v1","quantity":2,
+    "unit_attributes": { "color":"black","size":"M" },
+    "metadata": {}
+  }
+  ```
+
+  Response: `201` with created line resource and new cart `version`.
+
+* `PUT /v1/carts/{cartId}/lines/{lineId}`
+  Purpose: Replace line (quantity/attributes). Use optimistic concurrency.
+
+* `PATCH /v1/carts/{cartId}/lines/{lineId}`
+  Purpose: Change quantity, attributes, metadata (partial).
+
+* `DELETE /v1/carts/{cartId}/lines/{lineId}`
+  Purpose: Remove line. Response: `204`.
+
+* `POST /v1/carts/{cartId}/lines/bulk`
+  Purpose: Bulk add/update/remove lines (accepts array operations). Returns per-line results and new cart version.
+
+Notes: Cart service should *not* compute final price logic here — it can return cached/last-known pricing and call Pricing Service or Price Preview endpoints for authoritative totals.
+
+---
+
+# 3 — Cart totals / preview / price calculation hooks
+
+Cart service exposes endpoints to fetch authoritative totals by calling Pricing/Tax/Shipping services (or acting as a façade).
+
+* `GET /v1/carts/{cartId}/totals`
+  Purpose: Return cached totals (may be slightly stale) including per-line unit\_price, line\_total, discounts, tax, shipping estimate, and grand total. Query params: `fresh=true` to force recompute synchronously (may be slower).
+
+* `POST /v1/carts/{cartId}/calculate`
+  Purpose: Force synchronous recompute — invokes Pricing Service, Tax Service and Shipping rates; returns detailed breakdown and explanation. Body options: `{ "force": true, "include_fees": true, "simulate_promos": ["SUMMER10"], "timeout_ms":3000 }`. Response: detailed totals + `calculation_id`.
+
+* `POST /v1/carts/{cartId}/price-preview`
+  Purpose: Lightweight preview endpoint for UI (may use caches and allow `max_age_seconds`), returns summarized totals and list of applied adjustments.
+
+* `GET /v1/carts/{cartId}/line-prices`
+  Purpose: Return per-line price candidates (e.g., list price, sale price, account price) if requested.
+
+Design note: Pricing/tax/shipping are external systems — cart service must expose simple APIs to request recompute and must be able to cache calculation results and surface `calculation_id` for auditing.
+
+---
+
+# 4 — Coupons / Promotions (apply / remove / validate)
+
+Integrate with Promotions Service and Pricing Service — cart service manages which coupons are attached to the cart and performs validation preview calls.
+
+* `POST /v1/carts/{cartId}/coupons`
+  Purpose: Attach coupon(s) to cart (attempts to validate but does not finalize redemption). Body: `{ "codes": ["SUMMER10"], "apply_mode":"best|stack|all" }` → returns per-code validation results and updated cart `version`.
+
+* `DELETE /v1/carts/{cartId}/coupons/{code}`
+  Purpose: Remove coupon from cart.
+
+* `GET /v1/carts/{cartId}/coupons`
+  Purpose: List applied coupons and validation status.
+
+* `POST /v1/carts/{cartId}/promotions/validate`
+  Purpose: Validate current cart context against promotions/rules (calls Promotions Service) and return which promotions would apply and why (explainable).
+
+Important: actual coupon redemption (consuming usage counters) must be done by Promotions Service during checkout; cart attachment is non-consuming preview by default. If business requires reservation of promo quantities, use a dedicated reservation flow with Promotions Service.
+
+---
+
+# 5 — Addresses, shipping options & shipping estimates
+
+Cart owns selected shipping address, shipping method selection, and calls Shipping Service for estimates.
+
+* `POST /v1/carts/{cartId}/shipping-address`
+  Purpose: Set shipping address for cart. Body: address object. Response updated cart.
+
+* `GET /v1/carts/{cartId}/shipping-options`
+  Purpose: Return available shipping options and cost estimates for current cart context. Query `include_rates=true` (calls Shipping Service).
+
+* `POST /v1/carts/{cartId}/shipping-method`
+  Purpose: Select shipping method (sets shipping line and triggers `calculate` to update totals).
+
+* `POST /v1/carts/{cartId}/pickup-location`
+  Purpose: Opt for store pickup (select store id).
+
+Cart service should not calculate shipping rates itself — it calls shipping service or provides estimated rates.
+
+---
+
+# 6 — Taxes & tax-exemption flags (cart-level)
+
+Cart may hold tax-related metadata and request tax calculation externally.
+
+* `PATCH /v1/carts/{cartId}` (or dedicated endpoint) to set `tax_exempt: true` with reason (e.g., B2B exemption id).
+* `POST /v1/carts/{cartId}/tax-preview` — request tax calculation for the cart (calls Tax Service) and return tax breakdown.
+
+---
+
+# 7 — Sessions, tokens, and multi-device sync (merge / sync)
+
+Support guest carts persisted via token and merge carts when a guest logs in.
+
+* `POST /v1/carts/{cartId}/token`
+  Purpose: Issue/refresh guest `cart_token` for anonymous users (HTTP-only cookie recommended). Response: `{ "cart_token":"..." }`.
+
+* `POST /v1/carts/{cartId}/merge`
+  Purpose: Merge another cart into this one (e.g., guest → user). Body: `{ "source_cart_id":"...", "strategy":"merge_keep_quantities|source_wins|target_wins" }` → returns merged cart and conflict details. Must be idempotent (use `Idempotency-Key`).
+
+* `POST /v1/carts/{cartId}/sync`
+  Purpose: Sync client-side cart snapshot: accepts full cart payload and returns canonical cart (resolve conflicts using `version` or `merge_strategy`).
+
+* `GET /v1/carts/me`
+  Purpose: Return cart(s) associated with current session/user (active or last active).
+
+* `POST /v1/carts/{cartId}/claim`
+  Purpose: Claim guest cart for authenticated user (creates ownership mapping).
+
+Notes: Provide server-side merge rules and return `merge_report` to UI so it can show conflicts to user.
+
+---
+
+# 8 — Abandoned cart lifecycle & recovery signals
+
+Support marking carts as abandoned and exposing data for email reminders / marketing.
+
+* `POST /v1/carts/{cartId}/mark-abandoned`
+  Purpose: Mark cart as abandoned (or system can auto-mark based on `inactive_timeout`).
+
+* `GET /v1/carts/abandoned`
+  Purpose: List abandoned carts (filter by `inactive_since`, `owner`), useful for campaigns.
+
+* `POST /v1/carts/{cartId}/remind`
+  Purpose: Trigger reminder action (internal notification/webhook) — actual sending done by Notification/Marketing service.
+
+Cart service should emit `cart.abandoned` events (webhooks) when carts become abandoned.
+
+---
+
+# 9 — Save / restore carts, templates & lists
+
+Allow users to save carts for later, convert to templates, or create wishlists (if desired — wishlist may be separate).
+
+* `POST /v1/carts/{cartId}/save`
+  Purpose: Save cart as named snapshot (for later restore). Body: `{ "name":"Holiday List", "visibility":"private|shared", "expires_at":null }` → returns `snapshot_id`.
+
+* `GET /v1/carts/snapshots/{snapshotId}` / `POST /v1/carts/snapshots/{snapshotId}/restore` — restore snapshot into a live cart.
+
+* `GET /v1/carts/snapshots` — list saved snapshots for user.
+
+* `POST /v1/carts/{cartId}/create-template` — persist reusable cart-template for B2B or bulk ordering.
+
+---
+
+# 10 — Checkout initiation (hand-off) — *lightweight orchestration only*
+
+Cart service provides a hand-off endpoint that validates cart and returns a `checkout_token`; **it must not execute payment or create orders**.
+
+* `POST /v1/carts/{cartId}/checkout-initiate`
+  Purpose: Validate cart for checkout (inventory availability check delegated, totals locked optionally), optionally request inventory reservation via Inventory Service, and return `{ "checkout_token":"ct_abc", "valid_until":"..." }`. This token is used by Checkout/Order service to create an order. Response details validation issues.
+
+* `POST /v1/carts/{cartId}/checkout-validate`
+  Purpose: Lightweight validation on demand (no side-effects) — returns list of blockers.
+
+Important: do not perform final payment capture here.
+
+---
+
+# 11 — Cart events & webhooks
+
+Emit events for cart lifecycle: created, updated, line\_added, coupon\_applied, abandoned, checkout\_initiated, merged, deleted.
+
+* `GET /v1/carts/webhooks`
+* `POST /v1/carts/webhooks` `{ "url":"https://...","events":["cart.created","cart.updated","cart.abandoned","cart.checkout_initiated"], "secret":"..." }` → returns id.
+* `DELETE /v1/carts/webhooks/{id}`
+* `POST /v1/carts/webhooks/test` — send test payload.
+
+Event payloads should include `cart_id`, `owner`, `version`, and a delta describing changes.
+
+Also provide real-time subscription endpoint:
+
+* `GET /v1/carts/{cartId}/subscribe` — SSE/WebSocket endpoint for client to receive live updates for that cart (requires auth).
+
+---
+
+# 12 — Analytics, metrics & exports
+
+Provide cart-level KPIs and endpoints for exporting cart data for analytics.
+
+* `GET /v1/carts/metrics`
+  Purpose: Aggregate metrics: active carts, abandonment rate, avg cart value, lines per cart. Accept `from`/`to`.
+
+* `GET /v1/carts/{cartId}/history`
+  Purpose: Timeline of changes to the cart (audit trail).
+
+* `POST /v1/carts/exports`
+  Purpose: Export cart snapshots or abandoned carts to S3/BI (async job id).
+
+---
+
+# 13 — Admin / settings / quotas / retention
+
+Cart-related configuration and operational controls.
+
+* `GET /v1/carts/settings` — tenant-level settings: `max_lines_per_cart`, `max_quantity_per_line`, `inactive_timeout_seconds`, `guest_cart_ttl_days`, `merge_strategy_default`.
+* `PATCH /v1/carts/settings` — update tenant defaults.
+* `GET /v1/carts/quotas` / `PATCH` — API quotas (rate-limits) for storefronts.
+* `POST /v1/carts/maintenance/cleanup` — trigger clean-up of expired guest carts (async job id).
+* `GET /v1/carts/capabilities` — features enabled for tenant (multi-currency, multi-address, guest-carts).
+
+---
+
+# 14 — Security & access control
+
+API key and permission management for cart operations (public storefront vs admin tools).
+
+* `GET /v1/carts/keys` / `POST /v1/carts/keys` / `DELETE /v1/carts/keys/{keyId}` — create scoped keys (read-only vs write).
+* `GET /v1/carts/permissions` — check effective permissions for current token on cart(s).
+
+---
+
+# 15 — Idempotency, concurrency & consistency recommendations
+
+(Operational guidance — endpoints should implement these patterns)
+
+* Accept `Idempotency-Key` for all mutating operations that may be retried (`POST /lines`, `POST /checkout-initiate`, `POST /coupons`, bulk endpoints).
+* Use optimistic concurrency with `version` or ETag + `If-Match` header on update/delete; return `409` with current state if mismatched.
+* Keep cart updates small and frequent; consider delta-based APIs (send only changes) to reduce bandwidth.
+* Provide `calculation_id` and `calculated_at` when returning totals to help consumers validate stale caches.
+
+---
+
+# 16 — Example cart resource (canonical)
+
+```json
+{
+  "id":"cart_001",
+  "owner": { "type":"user","id":"user_123" },
+  "cart_token":"guest_abc123",          // present for guest carts
+  "status":"active",                    // active|abandoned|converted|archived
+  "currency":"GBP",
+  "channel":"web",
+  "locale":"en-GB",
+  "lines":[
+    {
+      "id":"line_1",
+      "client_line_id":"cl-123",
+      "sku":"SKU-1",
+      "variant_id":"v1",
+      "quantity":2,
+      "unit_attributes":{"color":"black"},
+      "metadata":{}
+    }
+  ],
+  "applied_coupons":[ { "code":"SUMMER10","valid":true } ],
+  "shipping_address": { /* address object */ },
+  "billing_address": null,
+  "selected_shipping_method": null,
+  "totals": {
+    "calculation_id":"calc_20250829_1",
+    "calculated_at":"2025-08-29T12:00:00Z",
+    "sub_total":4995,
+    "discount_total":500,
+    "tax_total":500,
+    "shipping_total":399,
+    "grand_total":5394
+  },
+  "version": 12,
+  "created_at":"2025-08-29T11:55:00Z",
+  "updated_at":"2025-08-29T12:00:00Z",
+  "metadata": { "session_id":"s_abc" }
+}
+```
+
+---
+
+# Design & implementation notes (brief)
+
+* **Keep carts ephemeral and fast**: serve active cart operations at low latency (cache hot carts in Redis / memory), persist snapshots for durability.
+* **Delegate heavy work**: pricing, tax, shipping, promotions, and inventory checks are external services — Cart Service should orchestrate and cache results, not reimplement them.
+* **Idempotency & optimistic concurrency**: critical for high-concurrency checkouts, cart sync and mobile clients.
+* **Real-time UX**: provide SSE/WebSocket subscription for live multi-device sync and show merge conflicts gracefully.
+* **Abandoned cart pipeline**: emit `cart.abandoned` events and provide export endpoints so Marketing/CRM can run recovery campaigns.
+* **Security**: protect guest cart tokens, rotate keys, and limit operations per IP/user to prevent abuse.
+* **Observability**: instrument cart churn, add/remove rates, abandonment, cart value histograms and `calculate` latency to tune system behavior.
+* **Storage model**: keep a normalized lines table and a cart snapshot for fast reads and history/audit.
+
+---
+
+If you want I can:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`POST /v1/carts`, `/lines`, `/calculate`, `/checkout-initiate`, coupon endpoints),
+* produce **JSON schemas** for `cart` / `line` / `calculate` request & response shapes,
+* or design a **race-free cart merge algorithm** and database schema (pseudocode + SQL examples) for high-concurrency mobile + desktop flows.
+
+Which would you like next?

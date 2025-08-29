@@ -1,0 +1,371 @@
+# Shipping & Carrier Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for a **Shipping & Carrier Service**. It includes **only** endpoints relevant to shipping, carrier connectors, rate-shopping, label generation, tracking, pickups, manifests, returns labels, customs/commerce paperwork, EDI/AS2, webhooks, carrier account management and operational tooling. It **does not** include order/fulfillment creation, inventory, payments, or pricing business logic — those are referenced by id (`order_id`, `fulfillment_id`, `package_id`, etc.).
+
+---
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/shipping` (tenant prefix via `X-Tenant-ID` header or `/v1/{tenantId}/shipping`)
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Public (client) flows can use short-lived publishable keys for rate quotes/label creation where appropriate.
+* Content-Type: `application/json`. File transfers (labels, manifests) via presigned URLs.
+* Idempotency: all mutating endpoints accept `Idempotency-Key`.
+* Concurrency: use `If-Match` / ETag or `version` on resources that may be concurrently edited.
+* Pagination: cursor + `limit` for listing endpoints.
+* Money: amounts (insurance, COD) in minor units + `currency`.
+* Time format: RFC3339 / ISO8601.
+* Responses: `200`, `201`, `202` (async job), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`.
+* Webhooks and carrier callbacks must be HMAC-signed and verifiable.
+
+---
+
+# 1 — Carrier & Connector management
+
+Register and manage carrier connectors (Adyen/Stripe Shipping, DHL, UPS, FedEx, local carriers), accounts, credentials and routing preferences.
+
+* `GET /v1/shipping/connectors`
+* `POST /v1/shipping/connectors` — register connector: `{ name, type:"dhl|ups|fedex|local|3pl|edi", config:{...}, priority, regions:[...] }`
+* `GET /v1/shipping/connectors/{connectorId}` / `PATCH` / `DELETE`
+* `POST /v1/shipping/connectors/{connectorId}/test` — test credentials & connectivity, returns diagnostics.
+* `GET /v1/shipping/carrier-accounts` — list carrier accounts configured across connectors.
+* `POST /v1/shipping/carrier-accounts` — add carrier account for tenant: `{ connector_id, account_credentials:{...}, label:"account-us-west" }`
+* `GET /v1/shipping/carrier-accounts/{accountId}` / `PATCH` / `DELETE`
+* `POST /v1/shipping/carrier-accounts/{accountId}/rotate-credentials` — rotate secrets safely.
+* `GET /v1/shipping/connectors/{id}/logs` — connector activity & errors.
+
+---
+
+# 2 — Rates & quote engine (rate-shopping)
+
+Quote shipping rates for packages, support caching and rate-tables.
+
+* `POST /v1/shipping/rates/quote`
+  Request live quotes for one shipment: `{ from_address, to_address, packages:[{weight,dimensions}], service_filters, declared_value, carrier_preferences, pickup_date }`
+  Response: list of `rate` objects: `{ carrier, carrier_account, service_code, transit_days, total_amount, breakdown:{base, fuel, surcharge, tax, discounts}, estimated_delivery }`.
+
+* `POST /v1/shipping/rates/batch-quote` — multi-shipment / bulk quotes (async job id).
+
+* `GET /v1/shipping/rates/{rateId}` — cached/selected rate detail (useful for UI).
+
+* `POST /v1/shipping/rates/compare` — return best N quotes by `cost|transit|carbon|custom_score`.
+
+* `GET /v1/shipping/rate-tables` — managed negotiated rates / contracted prices.
+
+* `POST /v1/shipping/rate-tables` / `PATCH` / `DELETE` — admin operations to maintain tenant-specific tables.
+
+* `POST /v1/shipping/rates/estimate` — lightweight cached estimate for UI (may accept `max_staleness_seconds`).
+
+Design notes: support `delivery_window` and `saturday_delivery` flags; support `carbon_impact` estimation.
+
+---
+
+# 3 — Shipment creation, labels & documentation
+
+Create shipments, generate labels (PDF/ZPL/PNG), attach customs docs and insurance.
+
+* `POST /v1/shipping/shipments`
+  Create shipment resource: `{ order_id, fulfillment_id, from_warehouse_id, to_address, packages:[{package_id,weight,dimensions,contents}], service_code, carrier_account_id, insurance:{amount,currency}, cod:{amount,currency,remit_to}, customs:{hs_codes,origin_country,invoice}, metadata }`
+  Returns `shipment_id`, preliminary `label_status`, and `rate_id` used.
+
+* `GET /v1/shipping/shipments/{shipmentId}` — full shipment details, status, packages, tracking, labels.
+
+* `POST /v1/shipping/shipments/{shipmentId}/generate-label`
+  Generate label(s) and booking with carrier; body may override `label_format`, `printer_language`. Returns `label_url` (presigned) and `carrier_tracking_number`, `carrier_manifest_ref`.
+
+* `GET /v1/shipping/shipments/{shipmentId}/label` — download latest label (presigned URL).
+
+* `POST /v1/shipping/shipments/{shipmentId}/regenerate-label` — regenerate label (reason required), idempotent.
+
+* `POST /v1/shipping/shipments/{shipmentId}/cancel-label` — cancel booking and label (if supported by connector). Returns cancellation result and potential carrier fees.
+
+* `POST /v1/shipping/shipments/{shipmentId}/attach-document` — attach customs docs, commercial invoice (store metadata + presigned upload).
+
+* `GET /v1/shipping/shipments/{shipmentId}/documents`
+
+* `POST /v1/shipping/shipments/bulk-generate-labels` — async label generation for many shipments (job id).
+
+Notes: Label generation may be synchronous or async depending on carrier. Always return `carrier_response` details for reconciliation.
+
+---
+
+# 4 — Tracking & lifecycle events
+
+Track shipments and expose tracking info + webhook subscriptions.
+
+* `GET /v1/shipping/trackings/{trackingNumber}`
+  Retrieve canonical tracking status and event history (scanned events with timestamps, location, status\_code, description, proof\_of\_delivery).
+
+* `GET /v1/shipping/shipments/{shipmentId}/tracking` — shipment-level tracking.
+
+* `POST /v1/shipping/trackings/{trackingNumber}/refresh` — force refresh from carrier.
+
+* `GET /v1/shipping/trackings?order_id=...&status=...` — list tracking items by filter.
+
+* `POST /v1/shipping/trackings/batch-refresh` — bulk refresh job.
+
+* `GET /v1/shipping/proof-of-delivery/{shipmentId}` — retrieve POD documents or signed image (presigned URL).
+
+* `POST /v1/shipping/tracking/unified-feed` — register webhook for external systems to receive canonical tracking events.
+
+Event model: `{ event_type, timestamp, location, code, description, carrier_event_raw, attempts, metadata }`.
+
+---
+
+# 5 — Pickup scheduling & carrier pickups
+
+Schedule courier pickup, modify or cancel.
+
+* `POST /v1/shipping/pickups`
+  Create pickup request: `{ carrier_account_id, pickup_date, earliest, latest, location:{warehouse_id,address}, shipments:[shipmentId,...], instructions }` → returns `pickup_id` and `status`.
+
+* `GET /v1/shipping/pickups/{pickupId}` — pickup status and assigned driver info.
+
+* `POST /v1/shipping/pickups/{pickupId}/cancel` — cancel pickup.
+
+* `POST /v1/shipping/pickups/{pickupId}/reschedule` — reschedule.
+
+* `GET /v1/shipping/pickups?date=...&warehouse_id=...` — list scheduled pickups.
+
+---
+
+# 6 — Manifests, EDI & carrier dispatch files
+
+Generate manifests and support EDI/AS2 transmissions.
+
+* `POST /v1/shipping/manifests`
+  Create manifest for multiple shipments: `{ warehouse_id, carrier_account_id, shipments:[...], dispatch_date }` → returns `manifest_id` and `manifest_file_url`.
+
+* `GET /v1/shipping/manifests/{manifestId}` — manifest status & file.
+
+* `POST /v1/shipping/manifests/{manifestId}/submit` — submit to carrier (via connector) or 3PL.
+
+* `POST /v1/shipping/edi/transmit` — send EDI/AS2 documents (850/856/940) to trading partner: `{ connector_id, document_type, payload_url }`.
+
+* `GET /v1/shipping/edi/logs` — EDI transmission logs and ack statuses.
+
+---
+
+# 7 — Returns labels & RMA support
+
+Create return shipping labels and return instructions.
+
+* `POST /v1/shipping/returns/labels`
+  Generate return label for a return: `{ return_id, to_address (warehouse), from_address (customer), service_code, carrier_account_id, prepaid_or_collect }` → returns `return_label_url` and `return_tracking_number`.
+
+* `POST /v1/shipping/returns/labels/bulk` — bulk return labels (async job).
+
+* `GET /v1/shipping/returns/{returnId}/label` — retrieve label.
+
+* `POST /v1/shipping/returns/{returnId}/schedule-pickup` — schedule carrier pickup for returns.
+
+Notes: support RMA-specific return flows like QR labels, merchant prepaid returns, or customer-paid returns.
+
+---
+
+# 8 — Customs, duties & international paperwork
+
+Compute/attach customs forms, duties estimation, and e-doc handling.
+
+* `POST /v1/shipping/customs/estimate`
+  Estimate duties & taxes for international shipment: `{ shipments:[{value,currency,hs_tariff,origin}], to_country }` → returns estimated duties, import VAT, broker fees.
+
+* `POST /v1/shipping/customs/generate` — generate customs documents (commercial invoice, CN22/CN23) for a shipment; returns document URLs.
+
+* `GET /v1/shipping/customs/classifications/{sku}` — lookup HS codes (tenant-managed or integrated service).
+
+* `POST /v1/shipping/customs/clearance/submit` — submit clearance package to customs broker (async).
+
+* `GET /v1/shipping/customs/clearance/{jobId}` — status.
+
+---
+
+# 9 — Shipping rules, packaging & profiles
+
+Tenant-level rules for packaging, carrier selection, and label preferences.
+
+* `GET /v1/shipping/packaging-profiles` — list supported packages & box types.
+
+* `POST /v1/shipping/packaging-profiles` / `PATCH` / `DELETE`
+
+* `GET /v1/shipping/routing-rules` — list routing rules (by country, weight, sku, zone).
+
+* `POST /v1/shipping/routing-rules` — create rule: `{ conditions, priority, action:{carrier_account_id|service_code|hold} }`.
+
+* `GET /v1/shipping/pricing-rules` / `POST /v1/shipping/pricing-rules` — surcharge maps (fuel, remote area, dimensional factor).
+
+* `POST /v1/shipping/packaging/auto-suggest` — suggest package configuration from line items (returns list of package groups and fit).
+
+---
+
+# 10 — Claims, exceptions & refunds (shipping-related)
+
+Record shipping exceptions and process carrier claims.
+
+* `GET /v1/shipping/claims` — list claims (lost/damaged/short).
+
+* `POST /v1/shipping/claims` — create claim: `{ shipment_id, tracking_number, claim_type:"lost|damaged", amount, evidence:[{url}], notes }` → returns `claim_id`.
+
+* `GET /v1/shipping/claims/{claimId}` — claim status and interactions with carrier.
+
+* `POST /v1/shipping/claims/{claimId}/submit-to-carrier` — attach evidence and submit.
+
+* `POST /v1/shipping/claims/{claimId}/resolve` — record resolution & settlement (integrate with Billing/Payments to issue refunds).
+
+---
+
+# 11 — Webhooks & event subscriptions
+
+Notify systems of carrier and label events.
+
+* `GET /v1/shipping/webhooks`
+
+* `POST /v1/shipping/webhooks` `{ url, events:[ "shipment.created","label.generated","tracking.updated","manifest.submitted","pickup.scheduled","claim.updated" ], secret }` → returns `webhook_id`.
+
+* `DELETE /v1/shipping/webhooks/{id}` / `POST /v1/shipping/webhooks/test`.
+
+* Carrier callbacks:
+
+  * `POST /v1/shipping/webhook/carrier` — receives carrier events (signed). Must map to `shipment_id` and be idempotent.
+
+Event payloads include correlation ids: `order_id`, `fulfillment_id`, `shipment_id`, `package_id`, `tracking_number`.
+
+---
+
+# 12 — Batch jobs, imports & exports
+
+Support large file operations (NACHA, carrier files, bulk labels).
+
+* `POST /v1/shipping/imports` — import shipments/labels via S3 NDJSON (returns `job_id`).
+
+* `GET /v1/shipping/imports/{jobId}` — status & errors.
+
+* `POST /v1/shipping/exports` — export shipment/manifest/label sets to S3 (async job).
+
+* `GET /v1/shipping/exports/{jobId}` — download link.
+
+* `POST /v1/shipping/jobs/{jobId}/cancel` — cancel long-running job.
+
+---
+
+# 13 — Sandbox & test utilities
+
+Testing connectors, simulate carrier events and test labels.
+
+* `POST /v1/shipping/test/connector-simulate` — simulate carrier responses for dev tenants (only in sandbox).
+
+* `GET /v1/shipping/test/labels` — sample test labels and behaviors.
+
+(Disabled in production.)
+
+---
+
+# 14 — Security, keys & RBAC
+
+Manage keys, roles, access control for shipping operations.
+
+* `GET /v1/shipping/keys` / `POST /v1/shipping/keys` — create API keys (scoped to read, rate\_quote, label\_create). Keys shown plaintext only once.
+
+* `GET /v1/shipping/roles` / `POST /v1/shipping/roles` — manage roles (ship\_admin, ops, manifest\_creator).
+
+* `GET /v1/shipping/permissions/me` — effective permissions.
+
+---
+
+# 15 — Health, metrics & diagnostics
+
+Operational SRE endpoints for shipping platform health.
+
+* `GET /v1/shipping/health` — subsystems: connectors, label generator, job queue, tracking update worker.
+
+* `GET /v1/shipping/metrics` — KPIs: label\_generation\_latency, quote\_latency, label\_failure\_rate, pickup\_success\_rate, average\_transit\_time p50/p95, manifest\_submission\_failures.
+
+* `GET /v1/shipping/diagnostics` — connector liveness, last successful API call timestamp per connector, queue depths, recent webhook failures.
+
+---
+
+# 16 — Examples of canonical resources
+
+Shipment (abridged):
+
+```json
+{
+  "id":"sh_0001",
+  "order_id":"ord_123",
+  "fulfillment_id":"ful_22",
+  "status":"label_generated", // draft|label_pending|label_generated|booked|in_transit|delivered|exception|cancelled
+  "carrier":"DHL",
+  "carrier_account_id":"ca_345",
+  "service_code":"express",
+  "packages":[
+    { "package_id":"pkg_1","weight":1200,"dimensions":{"l":30,"w":20,"h":10}, "contents":[{"sku":"SKU-1","qty":2}] }
+  ],
+  "rate_id":"rate_789",
+  "declared_value": 20000,
+  "currency":"GBP",
+  "insurance": {"amount":20000,"provider":"carrier_ins"},
+  "carrier_tracking_number":"JD000111222",
+  "label_url":"https://s3.../label_sh_0001.pdf",
+  "created_at":"2025-08-29T12:20:00Z",
+  "updated_at":"2025-08-29T12:21:00Z",
+  "metadata":{}
+}
+```
+
+Rate (abridged):
+
+```json
+{
+  "id":"rate_789",
+  "carrier":"DHL",
+  "carrier_account_id":"ca_345",
+  "service_code":"express",
+  "transit_days":1,
+  "total_amount":1299,
+  "currency":"GBP",
+  "breakdown": { "base":999, "fuel":200, "surcharge":100 },
+  "estimated_delivery":"2025-08-30",
+  "carbon_grams":450
+}
+```
+
+Tracking event:
+
+```json
+{
+  "shipment_id":"sh_0001",
+  "tracking_number":"JD000111222",
+  "event_type":"ARRIVED_AT_FACILITY",
+  "timestamp":"2025-08-29T16:12:00Z",
+  "location":{"city":"London","country":"GB","postal_code":"SW1A 1AA"},
+  "description":"Arrived at sorting facility",
+  "carrier_raw":{ "code":"PICKUP_ARRIVAL", "detail":"..." }
+}
+```
+
+---
+
+# 17 — Design notes & best practices (brief)
+
+* **Separation of concerns:** Shipping service handles rate-shopping, label generation, tracking consolidation, manifests and EDI. Fulfillment or Order services create `shipment` requests and provide `order_id`/`fulfillment_id` references. Inventory and payments remain authoritative elsewhere.
+* **Idempotency & retries:** label creation and carrier bookings should be idempotent to protect against double-booking or duplicate labels. Require `Idempotency-Key`.
+* **Rate caching vs live quotes:** provide both cached estimate (`estimate`) for UI and live `quote` for final selection; include TTL and quote\_source metadata.
+* **Carrier connectors isolation:** treat connectors as pluggable adapters with robust retry/backoff; normalize carrier responses into canonical fields and preserve raw carrier payload for audit.
+* **Async heavy ops:** label generation for many shipments, manifest submission, and EDI transmissions should be async with job ids and detailed error reports.
+* **Webhook reliability:** use HMAC signatures for outbound webhooks and verify inbound carrier callbacks. Make webhook delivery idempotent and retry with exponential backoff. Provide dead-letter logs.
+* **Customs & compliance:** surface customs estimation and required paperwork early (during rate/quote) and store customs documents with integrity hashes. Support broker integrations.
+* **Proof-of-delivery & evidence:** store POD artefacts (images, signed receipts) via presigned URLs, and expose access logs for audits.
+* **Routing & optimization:** allow tenant-level rules for carrier selection (cost vs transit vs carbon vs SLA), and support overrides for zone restrictions. Provide default fallback connectors per region.
+* **Label formats & printing language:** support multiple label formats and printer languages (ZPL) and expose metadata to select correct format.
+* **Security & compliance:** carrier credentials and secrets must be encrypted and rotated. Limit access to printing/label-creation scopes for frontend keys.
+* **Observability & SLOs:** monitor quote latency, label generation failures, carrier rejection rates, manifest submission failures and pickup success rates. Surface per-connector KPIs for ops.
+* **Testing & sandbox:** provide test connectors and simulated carrier events; ensure test infra cannot issue real carrier bookings.
+
+---
+
+If you want, next I can:
+
+* generate an **OpenAPI (Swagger) skeleton** for the core endpoints (`/rates/quote`, `/shipments`, `/shipments/{id}/generate-label`, `/trackings`, `/connectors`),
+* produce detailed **JSON schemas** for `Shipment`, `RateQuote`, `TrackingEvent`, and `Manifest` resources,
+* or design the **label generation & booking workflow** (sequence diagram + pseudocode + error compensation) for race-free booking and manifesting.
+
+Which would you like me to produce now?

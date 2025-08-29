@@ -1,0 +1,421 @@
+# Order Management Service — REST API surface
+
+Nice — below is a complete, focused RESTful API design for an **Order Management Service (OMS)**. It contains **only** endpoints relevant to orders and their immediate concerns: order lifecycle, lines, fulfillment/shipment, returns & cancellations, holds/allocations (delegated to inventory), invoices/financial links, edits & workflows, events/webhooks, search/exports, audit, metrics and admin. I **do not** include product/catalog, cart, pricing, inventory internals, or payment gateway internals — those are referenced by ID and integrated where needed.
+
+---
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/orders`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths.
+* Content-Type: `application/json`. Bulk imports accept NDJSON or file pointers.
+* Pagination: `page`/`limit` or cursor-based (`cursor`, `limit`).
+* Common query params: `customer_id`, `status`, `from`, `to`, `channel`, `warehouse`, `sort`, `expand` (e.g., `expand=lines,shipments,payments`).
+* Idempotency: mutation endpoints accept `Idempotency-Key`.
+* Concurrency: use `version`/ETag + `If-Match` on edits to avoid lost updates.
+* Standard responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+* Money fields: minor units + currency (e.g., `amount: 4995, currency: "GBP"`).
+
+---
+
+# 1 — Order CRUD & lifecycle
+
+Core creation, retrieval, listing and soft-delete of orders.
+
+* `POST /v1/orders`
+  Purpose: Create an order (from cart or manual B2B entry). Body includes `customer_id`, `source` (cart/order\_import/manual), `currency`, `items` (sku/variant/qty), `shipping_address`, `billing_address`, `payments` (references), `metadata`. Returns `201` with `order_id` and initial status (`created|pending|confirmed|on_hold`).
+
+* `GET /v1/orders/{orderId}`
+  Purpose: Retrieve full order (lines, totals, shipments, payments, events, audit). Query `expand=lines,shipments,payments,fulfillments,invoices`.
+
+* `GET /v1/orders`
+  Purpose: List orders with filters: `status`, `customer_id`, `channel`, `warehouse`, `from`, `to`, `min_total`, `shipping_status`, `fulfillment_status`. Supports sort, fields selection, and pagination.
+
+* `PATCH /v1/orders/{orderId}`
+  Purpose: Partial update of order metadata or addresses (allowed only in editable statuses). Use `If-Match` or `version`.
+
+* `DELETE /v1/orders/{orderId}`
+  Purpose: Soft-cancel/delete (admin); query `hard=true` for permanent deletion if allowed.
+
+* `POST /v1/orders/{orderId}/duplicate`
+  Purpose: Create a copy (replicate lines, addresses, metadata) for re-ordering.
+
+---
+
+# 2 — Order lines management
+
+Manage line items at order-level: add, update, remove, split lines, manual price adjustments.
+
+* `POST /v1/orders/{orderId}/lines`
+  Add a line. Body: `{ "sku","variant_id","quantity","unit_price":{amount,currency}, "tax","metadata" }`. Idempotent via `client_line_id`.
+
+* `PATCH /v1/orders/{orderId}/lines/{lineId}`
+  Update quantity, metadata, or unit-level adjustments (only when order editable). Must create audit entry.
+
+* `DELETE /v1/orders/{orderId}/lines/{lineId}`
+  Remove a line (may require re-calculation / credit note if already invoiced). Returns updated totals.
+
+* `POST /v1/orders/{orderId}/lines/{lineId}/split`
+  Split a line into multiple lines (for partial shipment/fulfillment).
+
+* `POST /v1/orders/{orderId}/lines/bulk`
+  Bulk add/edit lines (async if large).
+
+Notes: authoritative price/tax recalculation typically delegated to Pricing/Tax service; OMS stores final captured prices per line.
+
+---
+
+# 3 — Order lifecycle transitions, state machine actions
+
+Explicit endpoints that trigger domain transitions (state changes mixed with business rules).
+
+* `POST /v1/orders/{orderId}/confirm`
+  Confirm the order (validations: payment authorization, inventory availability, fraud checks). Moves `created → confirmed`.
+
+* `POST /v1/orders/{orderId}/hold`
+  Put order on hold (reason, assigned agent). E.g., fraud, manual review.
+
+* `POST /v1/orders/{orderId}/release`
+  Release hold (provide resolution notes).
+
+* `POST /v1/orders/{orderId}/cancel`
+  Request cancellation. Body: `{ "reason","refund":true|false,"restock":true|false }`. Returns outcome and any actions created (refunds/credit notes/returns).
+
+* `POST /v1/orders/{orderId}/resend-confirmation`
+  Re-send order confirmation email/notification.
+
+* `POST /v1/orders/{orderId}/close`
+  Mark order completed/closed (final state; after invoicing/shipment).
+
+* `POST /v1/orders/{orderId}/reopen`
+  Reopen a closed order (admin only; creates audit record).
+
+Each transition should produce an order event and audit entry.
+
+---
+
+# 4 — Fulfillment, shipments & tracking
+
+Manage physical fulfillment units, shipments, tracking, carriers and fulfillment centers.
+
+* `POST /v1/orders/{orderId}/fulfillments`
+  Create a fulfillment (one or many shipment groups). Body: `{ "warehouse_id","lines":[{line_id,quantity,lot_id,serials}], "carrier_hint","service_code","shipment_reference" }` → returns `fulfillment_id` with status `pending|in_transit|shipped|delivered|cancelled`.
+
+* `GET /v1/orders/{orderId}/fulfillments` / `GET /v1/orders/{orderId}/fulfillments/{fulfillmentId}`
+
+* `PATCH /v1/orders/{orderId}/fulfillments/{fulfillmentId}`
+  Update fulfillment status/estimated\_delivery/tracking.
+
+* `POST /v1/orders/{orderId}/fulfillments/{fulfillmentId}/ship`
+  Mark as shipped (creates shipment record and triggers shipment notification). Accepts tracking number(s), carrier, label reference.
+
+* `POST /v1/orders/{orderId}/fulfillments/{fulfillmentId}/cancel`
+  Cancel fulfillment (if not shipped).
+
+* `POST /v1/orders/{orderId}/shipments`
+  (Optional alternate model) Create shipment linking to fulfillment(s). Include `tracking_numbers`, `labels` (URL), `weight`, `dimensions`.
+
+* `GET /v1/orders/shipments/{shipmentId}/label`
+  Retrieve shipping label (PDF/PNG, or presigned URL).
+
+* `GET /v1/orders/shipments/{shipmentId}/tracking`
+  Get live tracking status (may proxy carrier or read linked tracking provider).
+
+* `POST /v1/orders/{orderId}/fulfillments/{fulfillmentId}/confirm-receipt`
+  For B2B or drop-ship, confirm receipt at destination.
+
+* `POST /v1/orders/fulfillments/bulk` — bulk create (async job).
+
+Integrations: call WMS/3PL via connectors; link `fulfillment.external_reference`.
+
+---
+
+# 5 — Returns, RMA, refunds & exchanges
+
+Handle returns lifecycle, RMA issuance, receiving, and credit/refund processing.
+
+* `POST /v1/orders/{orderId}/returns`
+  Create a return / RMA. Body: `{ "lines":[{line_id,quantity,reason_code}], "return_method":"ship|dropoff|pickup", "refund":"refund_to_card|store_credit", "instructions","metadata" }` → returns `return_id` and instructions (address, label).
+
+* `GET /v1/orders/{orderId}/returns/{returnId}` / `GET /v1/orders/{orderId}/returns`
+
+* `POST /v1/orders/returns/{returnId}/receive`
+  Mark items received (include condition, serials, actual\_qty). Triggers inspection workflows.
+
+* `POST /v1/orders/returns/{returnId}/inspect`
+  Record inspection outcome, approve or reject return, propose restocking credit.
+
+* `POST /v1/orders/returns/{returnId}/ship-return-label`
+  Generate or retrieve return shipping label (link to carrier).
+
+* `POST /v1/orders/returns/{returnId}/issue-refund`
+  Trigger refund/credit note issuance (calls Billing/Payments service). Returns `refund_id` or `credit_note_id`.
+
+* `POST /v1/orders/returns/{returnId}/exchange`
+  Create exchange order or replacement fulfillment.
+
+* `POST /v1/orders/returns/bulk/receive` — bulk receive returns (async job).
+
+---
+
+# 6 — Cancellations, modifications & amendments
+
+Allow editing orders post-creation (with policy and audit). Provide quotes/previews for changes.
+
+* `POST /v1/orders/{orderId}/quote-change`
+  Request a quote for an edit (change qtys, add/remove lines, change shipping). Returns `quote_id` with new totals and delta.
+
+* `POST /v1/orders/{orderId}/apply-quote/{quoteId}`
+  Apply the quoted change (creates edit action, may trigger payments/refunds/reservations).
+
+* `POST /v1/orders/{orderId}/partial-cancel`
+  Cancel part of the order (specific lines/quantities). Body must specify refund behavior.
+
+* `POST /v1/orders/{orderId}/replace`
+  Replace an entire order (rare admin operation): creates new order and links to original.
+
+* `GET /v1/orders/{orderId}/edits`
+  List edits, who made them and link to resulting state.
+
+All edits produce audit trails and must be idempotent with conflict detection.
+
+---
+
+# 7 — Payments & settlements (order-level linking)
+
+OMS references payments and settlement records; payment operations performed by Payment/Billing services.
+
+* `GET /v1/orders/{orderId}/payments`
+  List payment intents/settlements associated with order.
+
+* `POST /v1/orders/{orderId}/payments/link`
+  Link a payment (by `payment_id` from Payment Service) to the order and apply amounts (partial/full). Body: `{ "payment_id","amount","apply_to_lines": [ {line_id,amount} ] }`.
+
+* `POST /v1/orders/{orderId}/payments/unlink`
+  Unlink/rollback an applied payment (admin).
+
+* `POST /v1/orders/{orderId}/payments/capture`
+  Request capture for an authorized payment (proxy to Payment Service). Typically invoked if capture\_mode=manual.
+
+* `GET /v1/orders/{orderId}/payments/{paymentId}` — retrieve payment allocation and status.
+
+* `POST /v1/orders/{orderId}/refunds`
+  Create refund record and trigger Payment/Billing integration. Body: `{ "amount","reason","lines":[...],"destination":"original_method|store_credit" }` → returns `refund_id`.
+
+Note: OMS should not store raw payment details; only references and reconciliation records.
+
+---
+
+# 8 — Invoicing & documents
+
+Link invoices, credit notes and documents to orders (created by Billing Service).
+
+* `GET /v1/orders/{orderId}/invoices`
+  List invoice(s) related to order.
+
+* `GET /v1/orders/{orderId}/invoices/{invoiceId}`
+
+* `POST /v1/orders/{orderId}/invoices/generate`
+  Request invoice generation (delegates to Billing service). Returns `invoice_id` or job id.
+
+* `GET /v1/orders/{orderId}/documents`
+  List attached documents (PDFs, packing slips, customs docs).
+
+* `GET /v1/orders/{orderId}/documents/{docId}` — download URL or presigned link.
+
+* `POST /v1/orders/{orderId}/documents/upload` — attach external docs (e.g., signed POD).
+
+---
+
+# 9 — Search, filters & advanced queries
+
+Powerful search endpoints for operators, CS and BI.
+
+* `POST /v1/orders/search`
+  Accepts JSON DSL: filters, full-text on `customer_name`, `external_reference`, `status`, aggregations (counts by status), sorts, pagination. Use for admin dashboards.
+
+* `GET /v1/orders/summary`
+  Quick product: `orders_count`, `revenue`, `avg_order_value` for date ranges and channels.
+
+* `POST /v1/orders/lookup`
+  Lightweight lookup by `external_reference`, `merchant_reference`, `customer_reference` (fast, indexed).
+
+---
+
+# 10 — Webhooks & events
+
+Emit order lifecycle events and accept inbound events from upstream/downstream systems.
+
+* `GET /v1/orders/webhooks`
+
+* `POST /v1/orders/webhooks` `{ "url":"https://...","events":[ "order.created","order.confirmed","order.shipped","order.cancelled","return.created" ], "secret":"..." }` → returns webhook id.
+
+* `DELETE /v1/orders/webhooks/{id}`
+
+* `POST /v1/orders/webhooks/test` — test payload.
+
+Inbound:
+
+* `POST /v1/orders/webhook/fulfillment` — receive fulfillment updates from 3PL/WMS (signed).
+* `POST /v1/orders/webhook/payment` — payment gateway/postback for payment state updates.
+* `POST /v1/orders/webhook/invoice` — billing service invoice state updates.
+
+All event payloads must include `order_id`, `correlation_id`, and `timestamp`.
+
+---
+
+# 11 — Batch operations, imports & exports
+
+Bulk workflows for enterprise usage.
+
+* `POST /v1/orders/imports`
+  Start order import (CSV/NDJSON, S3). Body: `{ "source":"s3://...","mode":"create|upsert","mapping":{...} }` → returns `job_id`.
+
+* `GET /v1/orders/imports/{jobId}` — status & errors.
+
+* `POST /v1/orders/exports`
+  Export orders to CSV/Parquet/S3 with filters. Returns `job_id` and download/presigned URL.
+
+* `POST /v1/orders/bulk/update-status` — bulk update order statuses (admin) — async.
+
+* `POST /v1/orders/bulk/reconcile` — reconcile external order feed vs OMS.
+
+---
+
+# 12 — Audit, timeline & activity history
+
+Immutable audit trail and per-order timeline.
+
+* `GET /v1/orders/{orderId}/timeline`
+  Returns event timeline: created, payments, reservations, fulfillments, shipments, returns, edits, notes.
+
+* `GET /v1/orders/audit`
+  Query audit logs across orders (filter actor, action, date range).
+
+* `GET /v1/orders/{orderId}/audit/{auditId}`
+
+All critical mutating actions must produce audit events with `actor_id`, `actor_type`, `reason` and `metadata`.
+
+---
+
+# 13 — Notes, tasks & case management (support)
+
+Order-level notes and support tasks for CS agents.
+
+* `POST /v1/orders/{orderId}/notes` — add note (private/public). Body: `{ "text","type":"public|internal","author_id" }`.
+
+* `GET /v1/orders/{orderId}/notes`
+
+* `POST /v1/orders/{orderId}/tasks` — create task/action for order (e.g., "call customer", "investigate refund"). Track completion.
+
+* `GET /v1/orders/tasks` — list open tasks across orders.
+
+---
+
+# 14 — SLA, holds, locks & concurrency helpers
+
+Operational controls to prevent concurrent conflicting actions.
+
+* `POST /v1/orders/{orderId}/locks`
+  Acquire short-lived lock for admin edits: `{ "ttl_seconds":300,"purpose":"cs_edit" }` → returns `lock_token`.
+
+* `DELETE /v1/orders/locks/{lockId}` — release.
+
+* Use optimistic `version`/`If-Match` on order edits; return `409` with `current_version` on conflict.
+
+---
+
+# 15 — Metrics, KPIs & operational endpoints
+
+Expose OMS metrics for SRE and business.
+
+* `GET /v1/orders/metrics`
+  KPIs: orders/day, revenue/day, fulfillment lead times, avg time-to-ship, returns rate, cancellation rate. Supports time-range.
+
+* `GET /v1/orders/metrics/fulfillment` — per-warehouse pick/pack/ship metrics.
+
+* `GET /v1/orders/health` — subsystem health (fulfillment workers, connector queues, job queues).
+
+---
+
+# 16 — Admin / settings / policies / capabilities
+
+Tenant-level OMS configuration and business rules.
+
+* `GET /v1/orders/settings` — settings: allow\_partial\_shipments, auto\_confirm\_thresholds, cancellation\_policy, default\_warehouse, order\_retention\_days.
+
+* `PATCH /v1/orders/settings` — update.
+
+* `GET /v1/orders/policies` / `POST /v1/orders/policies` — manage automation policies (auto-cancel unpaid after X hours, auto-fulfill for digital goods, fraud triggers).
+
+* `GET /v1/orders/capabilities` — features enabled for tenant (split-shipments, serialized-returns, 3PL\_connectors).
+
+---
+
+# 17 — Example Order resource (canonical)
+
+```json
+{
+  "id":"ord_2025_0001",
+  "external_reference":"PO-1001",
+  "status":"confirmed",                    // created|pending|confirmed|on_hold|cancelled|completed
+  "customer_id":"cust_123",
+  "channel":"web-uk",
+  "currency":"GBP",
+  "sub_total":4995,
+  "discount_total":500,
+  "tax_total":300,
+  "shipping_total":399,
+  "total":5194,
+  "balance_due":0,
+  "lines":[
+    {
+      "id":"line_1",
+      "sku":"SKU-1",
+      "variant_id":"v1",
+      "description":"Wireless headphones",
+      "quantity":2,
+      "unit_price":{"amount":2495,"currency":"GBP"},
+      "line_total":4990,
+      "tax":150
+    }
+  ],
+  "shipping_address":{ /* address */ },
+  "billing_address":{ /* address */ },
+  "fulfillments":[
+    { "id":"ful_1", "warehouse_id":"wh_1","status":"in_transit","shipment_id":"sh_1" }
+  ],
+  "payments":[ { "id":"pay_1", "payment_id":"pg_123", "amount":5194, "status":"captured" } ],
+  "invoices":[ {"id":"inv_1","status":"issued"} ],
+  "returns":[ ],
+  "created_at":"2025-08-29T12:00:00Z",
+  "updated_at":"2025-08-29T12:06:00Z",
+  "version":8,
+  "metadata": { "sales_rep":"alice", "priority":"high" }
+}
+```
+
+---
+
+# Design considerations & best practices (brief)
+
+* **OMS = orchestration + source of record for order state**: delegate pricing, inventory allocation, payments, taxes, shipping label generation and invoicing to specialized services; persist stable snapshots so you can reproduce and audit decisions.
+* **State machine & explicit transitions**: surface domain transitions via endpoints (confirm, hold, cancel, ship) rather than allowing arbitrary field writes — this preserves business rules and auditability.
+* **Idempotency & optimistic concurrency**: require `Idempotency-Key` for retriable commands and use `version`/ETag to prevent race edits. Return clear `409` responses with current state for client reconciliation.
+* **Atomic critical flows**: try to make critical combos (reserve inventory + authorize payment) transactional or implement reliable compensation (void payment, release reservation). Keep compensation workflows explicit and observable.
+* **Audit & timeline**: store full event timeline and who/what triggered each action (user, worker, webhook), for disputes and accounting.
+* **Integration points**: provide clean, reliable webhook contracts and idempotent webhooks handlers for carrier, payment, billing and 3PL callbacks. Use signed payloads.
+* **Support offline & manual operations**: agents must be able to edit orders, apply credits, force shipments, or manually create refunds — provide RBAC and audit.
+* **Performance & scale**: optimize reads for storefront/CS (caching) and use background workers for heavy tasks (bulk imports, reconciliation, label generation).
+* **Observability**: instrument latencies for confirm → fulfillment pipelines, payment attempt outcomes, return throughput, and common failure reasons.
+* **Data retention & compliance**: retain order records sufficiently for legal/tax (configurable per tenant), and provide export/archival flows.
+
+---
+
+If you’d like I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the key endpoints (`/orders`, `/fulfillments`, `/returns`, `/shipments`, `/payments/link`),
+* produce **detailed JSON schemas** for `order create`, `fulfillment creation`, and `return/RMA`,
+* or design an **order-confirmation -> reserve -> authorize -> finalize** state machine with pseudocode showing compensation logic for race conditions.
+
+Which would you like now?

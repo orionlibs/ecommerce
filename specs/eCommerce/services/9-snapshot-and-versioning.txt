@@ -1,0 +1,246 @@
+# Snapshot & Versioning Service — REST API endpoints
+
+Nice — here’s a focused, production-ready REST surface for a **Snapshot & Versioning Service**. This service provides immutable snapshots, version history, diffs, restore/rollback, retention/GC, tagging/pinning, and snapshot-based publishing for any resource in the platform (products, PIM content, store config, search index, exports, dataset dumps, DB backups, etc.). It **does not** host business data — it stores immutable objects and pointers to resource versions and coordinates restores with owning services.
+
+Base path assumption: `/api/v1`. Most endpoints are store-scoped where applicable: `/api/v1/stores/{storeId}/...`. Suggested auth scopes: `snapshot:read`, `snapshot:write`, `snapshot:admin`, `snapshot:export`. All list endpoints support `page`/`per_page` or cursor, `sort`, filtering, and `include` expansions.
+
+---
+
+## Concepts (quick)
+
+* **Snapshot** — immutable capture of a resource state (JSON, blob, DB dump, index snapshot). Has `snapshot_id`, `resource_type`, `resource_id` (optional), `created_by`, `created_at`, `tags`, `size`, `storage_location`, `hash` (dedupe), and optional `metadata` (channel, locale, job\_id, commit\_message).
+* **Version** — logical sequence for a resource (versions map to snapshots).
+* **Snapshot Policy** — rules to auto-create snapshots (cron, on-change, on-publish).
+* **Job** — long-running exports/imports/merge/restore that return `job_id`.
+* **Immutability & signing** — snapshots are immutable and may have signed public URLs for CDN/preview.
+
+---
+
+## Snapshot CRUD & retrieval
+
+* `POST /stores/{storeId}/snapshots`
+  Create a snapshot. Body examples: `{resource_type, resource_id?, payload?: JSON | reference_to_export_job, snapshot_type:"json|tar|db|index|asset", tags:[],metadata:{commit_message,channel,locale},ttl_days?,encrypt:true}`. Returns `201` with snapshot resource (`snapshot_id`) and storage details. Auth: `snapshot:write`.
+
+* `GET /stores/{storeId}/snapshots`
+  List snapshots. Filters: `resource_type`, `resource_id`, `tag`, `created_by`, `since`, `until`, `snapshot_type`, `min_size`, `job_id`. Query `?include=metadata,versions`. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshots/{snapshotId}`
+  Snapshot detail (metadata, storage\_location, hash, size, versions referenced, permalink, signed\_download\_url optional). Query `?signed=true&expires_in=3600`. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshots/{snapshotId}/download`
+  Get direct/signed download link (or stream). Auth: `snapshot:read` (public snapshots can be `public` with no auth if policy allows).
+
+* `DELETE /stores/{storeId}/snapshots/{snapshotId}`
+  Soft-delete or schedule deletion; `?force=true` to permanently remove (subject to retention rules). Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/restore`
+  Restore snapshot to its owning service or target. Body: `{target_service, target_resource_id?, restore_mode:"dry_run|apply|apply_with_preview", actor_id, preserve_current_version:true|false}`. Returns `202` with `job_id`. Auth: `snapshot:write` (restore to critical systems requires `snapshot:admin`).
+
+* `GET /stores/{storeId}/snapshots/{snapshotId}/restore/{jobId}`
+  Restore job status and logs. Auth: `snapshot:read`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/pin`
+  Pin snapshot to prevent GC. Body: `{reason,expires_at?}`. Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/unpin`
+  Unpin snapshot. Auth: `snapshot:admin`.
+
+---
+
+## Version history & mapping
+
+* `GET /stores/{storeId}/resources/{resource_type}/{resourceId}/versions`
+  List versions for a resource (version number, snapshot\_id, author, message, timestamp). Support `?limit=`, `?since=`. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/resources/{resource_type}/{resourceId}/versions/{versionId}`
+  Get specific version details and associated snapshot. Auth: `snapshot:read`.
+
+* `POST /stores/{storeId}/resources/{resource_type}/{resourceId}/versions`
+  Create a new semantic version entry that references an existing snapshot (`snapshot_id`), with commit metadata: `{snapshot_id,notes,author_id}`. Useful when snapshot was created by export job and later committed as a logical version. Auth: `snapshot:write`.
+
+* `GET /stores/{storeId}/resources/{resource_type}/{resourceId}/latest`
+  Shortcut to fetch latest version metadata or signed snapshot link. Auth: `snapshot:read`.
+
+---
+
+## Diff, compare & preview
+
+* `GET /stores/{storeId}/snapshots/{aId}/compare/{bId}?format=json|html&context=3`
+  Produce diff between two snapshots. Supports `format=json` (structured diff), `html` (rendered human diff), and `unified`/`word` types. For large blobs, service returns `job_id` for async diff. Auth: `snapshot:read`.
+
+* `POST /stores/{storeId}/snapshots/compare`
+  Async compare for large assets. Body: `{left_snapshot_id,right_snapshot_id,options:{context,ignore_paths[]}}`. Returns `job_id`. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshots/diff-jobs/{jobId}`
+  Get diff job status and download link. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshots/{snapshotId}/preview?type=json|rendered_html&include_assets=true`
+  Return a lightweight preview of snapshot contents for UI (sanitized, truncated). Auth: `snapshot:read`.
+
+---
+
+## Snapshot policies, automatic captures & scheduling
+
+* `POST /stores/{storeId}/snapshot-policies`
+  Create policy. Body: `{name,resource_type,trigger:"on_change|cron|on_publish|manual",cron_expression?,retention_days,keep_latest_n,tags_to_include,scope:{channels,locales,product_types},enabled:true}`. Auth: `snapshot:admin`.
+
+* `GET /stores/{storeId}/snapshot-policies` / `GET /stores/{storeId}/snapshot-policies/{policyId}` / `PATCH` / `DELETE`
+  Manage policies (versions, enable/disable). Auth: `snapshot:read` / `snapshot:admin`.
+
+* `POST /stores/{storeId}/snapshot-policies/{policyId}/run`
+  Trigger policy run manually (returns `job_id`). Auth: `snapshot:admin`.
+
+* `GET /stores/{storeId}/snapshot-policies/{policyId}/runs/{runId}`
+  Policy run status & created snapshots list. Auth: `snapshot:read`.
+
+---
+
+## Retention, GC & storage management
+
+* `GET /stores/{storeId}/storage/usage`
+  Storage usage metrics by snapshot\_type, tags, total bytes, deduplicated bytes. Auth: `snapshot:admin` or `billing:read`.
+
+* `POST /stores/{storeId}/retention-rules`
+  Define retention/garbage-collection rules. Body: `{tag,resource_type,keep_latest_n,keep_older_than_days,exclude_pinned:true}`. Auth: `snapshot:admin`.
+
+* `GET /stores/{storeId}/retention-rules` / `PATCH` / `DELETE`
+  Manage rules. Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/retention/preview`
+  Preview which snapshots would be deleted by current rules (dry-run). Body: `{limit=1000}`. Returns sample `snapshot_ids` and totals. Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/retention/run`
+  Run GC now. Returns `job_id` and summary once complete. Auth: `snapshot:admin`.
+
+---
+
+## Exports / Imports / Migration jobs
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/export`
+  Export snapshot to external storage or send to another environment. Body: `{destination:{type:"s3|gs|url",config},encrypt:true,notify_webhook?}`. Returns `export_job_id`. Auth: `snapshot:export`.
+
+* `POST /stores/{storeId}/snapshots/import`
+  Import a snapshot from external source. Body: `{source:{type:"s3|url|signed_link"},resource_type?,resource_id?,metadata}`. Returns `import_job_id`. Auth: `snapshot:write`.
+
+* `GET /stores/{storeId}/snapshots/imports/{importJobId}` / `GET /stores/{storeId}/snapshots/exports/{exportJobId}`
+  Job statuses and logs. Auth: `snapshot:read`.
+
+---
+
+## Merge & compose snapshots
+
+* `POST /stores/{storeId}/snapshots/compose`
+  Compose new snapshot from multiple existing ones (e.g., merge content + assets + config). Body: `{snapshot_ids:[],strategy:"overlay|union|patch",conflict_resolution:{prefer:"left|right|latest|manual"},metadata}`. Returns `job_id` (composition may be async). Auth: `snapshot:write`.
+
+* `GET /stores/{storeId}/snapshots/compose/{jobId}`
+  Status and resulting `snapshot_id` if successful. Auth: `snapshot:read`.
+
+---
+
+## Locking, approvals & protected restores
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/lock`
+  Lock snapshot for changes/restores. Body: `{reason,expires_at}`. Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/unlock`
+  Remove lock. Auth: `snapshot:admin`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/request-restore-approval`
+  Create an approval request (integrates with Workflow Service). Body: `{initiator_id,target_service,reason}`. Returns an `approval_request_id`. Auth: `snapshot:write`.
+
+---
+
+## Tags, annotations & metadata
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/tags`
+  Add tags. Body: `{tags:[]}`. Auth: `snapshot:write`.
+
+* `DELETE /stores/{storeId}/snapshots/{snapshotId}/tags/{tag}`
+  Remove tag. Auth: `snapshot:write`.
+
+* `GET /stores/{storeId}/snapshots/tags`
+  List tags with counts. Auth: `snapshot:read`.
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/annotations`
+  Attach human notes or audit metadata. Body: `{author_id,message}`. Auth: `snapshot:write`.
+
+---
+
+## Access control & signed URLs
+
+* `POST /stores/{storeId}/snapshots/{snapshotId}/share`
+  Create share token or signed URL. Body: `{expires_in_seconds,access:"read|download",allowed_ips?:[],note}`. Returns `share_token`/`signed_url`. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/shared-snapshots/{shareToken}`
+  Resolve shared snapshot (public access if token valid). No auth or token auth. Useful for preview links.
+
+---
+
+## Webhooks & events
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook: events include `snapshot.created`, `snapshot.deleted`, `snapshot.pinned`, `snapshot.restored`, `policy.run.completed`. Body: `{url,events[],secret,active,filters}`. Auth: `snapshot:admin`.
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Delivery logs & failures. Auth: `snapshot:admin`.
+
+---
+
+## Audit logs, lineage & governance
+
+* `GET /stores/{storeId}/snapshots/{snapshotId}/audit`
+  Snapshot-level audit trail (created\_by, restores, pins, exports). Auth: `snapshot:read` or `compliance:read`.
+
+* `GET /stores/{storeId}/lineage/{resource_type}/{resource_id}`
+  Lineage showing versions, snapshot ids, jobs that produced them, and downstream consumers. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshot-exports/{exportId}/audit`
+  Audit of export/import operations. Auth: `snapshot:read`.
+
+---
+
+## Search, discovery & admin helpers
+
+* `GET /stores/{storeId}/snapshots/search?q=...&tags=...&resource_type=...`
+  Full-text search over snapshot metadata and annotations with facets. Auth: `snapshot:read`.
+
+* `GET /stores/{storeId}/snapshots/summary?since=...&by=resource_type`
+  Summary metrics (snapshots created, bytes ingested, pinned count). Auth: `snapshot:read` or `billing:read`.
+
+* `GET /stores/{storeId}/snapshots/sample?limit=50`
+  Return small sample of snapshots for UI list view. Auth: `snapshot:read`.
+
+---
+
+## Jobs & generic job endpoint
+
+* `GET /stores/{storeId}/jobs/{jobId}`
+  Generic job status used by restore/compose/export/import/compare. Response: `{job_id,status,progress,created_at,started_at,completed_at,errors[],result:{snapshot_id,download_url,logs_url}}`. Auth: `snapshot:read`.
+
+---
+
+## Cross-cutting considerations & best practices
+
+* **Immutability**: snapshots are immutable — any `restore` or `compose` creates a new snapshot or triggers a target-side commit.
+* **ETag / If-Match**: use for updates to snapshot metadata and pin/unpin operations.
+* **Deduplication**: store content-addressed using hash (SHA256) to avoid duplicate storage; present logical snapshots referencing same object.
+* **Retention & compliance**: retention rules must be configurable per-store and per-tag and offer dry-run preview before GC. Provide export/retention policy reports for compliance.
+* **Signed URLs & access control**: prefer short-lived signed URLs for downloads; integrate with platform SSO for admin access.
+* **Auditability**: every create/restore/export/GC must be auditable and traceable to an actor (user or system).
+* **Integration hooks**: integrate with Workflow Service for approval gating of destructive restores/GC on protected snapshots.
+* **Storage tiers**: support lifecycle tiering (hot/cold/archival) and present `storage_class` in responses. Support async restore from archival tier.
+* **Preview safety**: `preview` endpoints should sanitize secrets (never expose sensitive credentials or PII) unless explicitly allowed and audited.
+* **Scale**: large diffs/DB snapshots are async — return `job_id` for large operations. Use streaming downloads and chunked upload for large imports.
+* **Encryption & keys**: support server-side and envelope encryption; record encryption metadata in snapshot.
+* **Edge/CDN**: published snapshots intended for storefront read should be exportable to CDN with signed URLs/invalidations.
+* **APIs for other services**: provide light-weight library/client SDK patterns for Product, PIM, Store services to create snapshots on changes.
+
+---
+
+If you want, I can next:
+
+* generate OpenAPI snippets for the core endpoints (`POST /snapshots`, `GET /snapshots/{id}`, `compare`, `restore`), or
+* produce JSON schema examples for `snapshot`, `version`, `job` and `retention-rule` resources, or
+* design the event payload schema used for `snapshot.created` and `snapshot.restored`.
+
+Which would you like me to produce right away?

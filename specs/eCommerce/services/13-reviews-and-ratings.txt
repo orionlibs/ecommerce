@@ -1,0 +1,387 @@
+# Product Reviews & Ratings Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for a **Product Reviews & Ratings** service for an eCommerce platform. It includes only endpoints relevant to reviews, ratings, replies, moderation, analytics, media attachments, import/export, webhooks and admin/config for that domain (no product, cart, stock, order endpoints).
+
+Common conventions
+
+* Base path: `https://api.example.com/v1/reviews`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Admin endpoints require elevated scopes; public read endpoints may allow API key or anonymous access with rate limits. Multi-tenant via `X-Tenant-ID` header or tenant-scoped paths (e.g. `/v1/{tenantId}/reviews`).
+* Content type: `application/json`. Media uploads use `multipart/form-data` or presigned URLs.
+* Pagination: `page`, `limit` (or cursor-based `cursor`, `limit`). Common sort: `sort=created_at:desc|asc|helpful:desc|rating:desc`.
+* Standard responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `429 Too Many Requests`, `500 Internal Server Error`.
+* Rate limits and abuse protection must be implemented (throttling, CAPTCHA on suspicious behavior, account verification for review posting).
+
+---
+
+# 1 — Review CRUD & lifecycle (public & user)
+
+Endpoints for creating, reading, updating, deleting reviews and draft flows.
+
+* `POST /v1/reviews`
+  Purpose: Create a new review (may create as draft if moderation required).
+  Body:
+
+  ```json
+  {
+    "product_id":"sku_123",
+    "user_id":"user_456",                 // optional for anonymous (but recommended)
+    "order_id":"order_789",              // optional (proof-of-purchase)
+    "rating": 4,                         // integer or float depending on policy
+    "title":"Great headphones",
+    "body":"Long form review text…",
+    "recommended": true,                 // boolean product recommended
+    "language":"en",
+    "locale":"en-GB",
+    "tags":["battery","comfort"],       // optional structured tags
+    "metadata": { "verified_purchase": true },
+    "consent": { "display_name": "John", "share_profile": true }
+  }
+  ```
+
+  Query params: `moderation=auto|manual|bypass` (admin only).
+  Response: `201` with created review, `status: pending|published|rejected|flagged`.
+
+* `GET /v1/reviews/{reviewId}`
+  Purpose: Retrieve a single review (includes moderation state, helpful counts, replies, attached media). Query: `expand=replies,media,author`.
+
+* `PATCH /v1/reviews/{reviewId}`
+  Purpose: Partial update of a review (user can edit until locked). Body: partial fields. System must validate edit windows and audit changes.
+
+* `PUT /v1/reviews/{reviewId}`
+  Purpose: Full replace (rare). Generally prefer PATCH.
+
+* `DELETE /v1/reviews/{reviewId}`
+  Purpose: Soft-delete review (allow restore). Query `hard=true` to permanently remove (admin only). Response: `204`.
+
+* `POST /v1/reviews/{reviewId}:restore`
+  Purpose: Restore soft-deleted review. Response: `200`.
+
+* `GET /v1/products/{productId}/reviews`
+  Purpose: List reviews for a product. Query params: `page`, `limit`, `sort`, `rating` (filter by rating), `language`, `verified_only=true`, `exclude_flagged=true`, `has_media=true`, `cursor`. Supports `fields` and `expand`. Response: paginated list + aggregated metadata (counts per rating).
+
+* `GET /v1/users/{userId}/reviews`
+  Purpose: List reviews posted by a user (profile page). Admin/audit may see pending/rejected ones.
+
+* `POST /v1/reviews/bulk`
+  Purpose: Bulk create reviews (NDJSON or array) for migration/import. Typically async → returns job id.
+
+* `GET /v1/reviews/bulk/{jobId}`
+  Purpose: Check bulk job status, errors.
+
+---
+
+# 2 — Ratings endpoints & aggregates
+
+Store and expose per-product aggregated rating metrics.
+
+* `POST /v1/ratings`
+  Purpose: Create or update a rating record (often handled with `POST /v1/reviews` automatically). Body: `{ "product_id":"sku","user_id":"u","rating":4 }` (optional).
+
+* `GET /v1/products/{productId}/ratings`
+  Purpose: Return aggregates: average\_rating, rating\_count, distribution (1–5 counts), weighted\_average, aggregated\_by\_locale. Response example:
+
+  ```json
+  {
+    "product_id":"sku_1",
+    "average":4.2,
+    "count":1234,
+    "distribution": {"5":700,"4":300,"3":130,"2":70,"1":34},
+    "rounded":"4.2",
+    "last_updated":"2025-08-29T12:00:00Z"
+  }
+  ```
+
+* `GET /v1/products/ratings/batch`
+  Purpose: Fetch rating aggregates for many product ids in one call (POST with `product_ids` array).
+
+* `GET /v1/categories/{categoryId}/ratings`
+  Purpose: Aggregate ratings across a category or query: returns category average & histogram.
+
+* `POST /v1/ratings/recalculate`
+  Purpose: Admin/maintenance endpoint to recalc aggregates (async job id) after backfill or policy changes.
+
+---
+
+# 3 — Helpfulness / Votes / Reactions
+
+Allow customers to vote reviews helpful / report abuse / mark as verified.
+
+* `POST /v1/reviews/{reviewId}/helpful`
+  Purpose: Mark a review helpful (or unhelpful). Body: `{ "user_id":"u1", "vote": 1 }` (`1` helpful, `-1` not helpful). Idempotent per user. Response: updated helpful counts.
+
+* `DELETE /v1/reviews/{reviewId}/helpful`
+  Purpose: Remove helpful vote. Response: `204`.
+
+* `POST /v1/reviews/{reviewId}/reactions`
+  Purpose: Add emoji reaction (e.g., `{"type":"heart"}`). List available reaction types in settings.
+
+* `GET /v1/reviews/{reviewId}/votes`
+  Purpose: Get helpfulness metrics and per-demographic breakdown (admin only / aggregated to avoid PII).
+
+---
+
+# 4 — Replies / Comments / Q\&A
+
+Support seller/brand replies and user comments (threaded, limited depth).
+
+* `POST /v1/reviews/{reviewId}/replies`
+  Purpose: Add a reply to a review (by seller, support agent, or user). Body: `{ "user_id":"agent_1","role":"seller|agent|user","body":"Thanks for the feedback","visibility":"public|private" }` Response: `201`.
+
+* `GET /v1/reviews/{reviewId}/replies`
+  Purpose: List replies (threaded). Query: `depth`, `page`, `limit`.
+
+* `PATCH /v1/replies/{replyId}` / `DELETE /v1/replies/{replyId}`
+  Purpose: Edit / soft-delete replies (admin & reply owner).
+
+* `POST /v1/reviews/{reviewId}/comments`
+  Purpose: Lightweight comment on review (if you want separate concept from replies).
+
+---
+
+# 5 — Media attachments (images, videos, files)
+
+Attach media to reviews and manage uploads.
+
+* `POST /v1/reviews/{reviewId}/media`
+  Purpose: Attach media via multipart or return presigned upload URL. Body: `multipart/form-data file` or `{ "filename":"img.jpg","content_type":"image/jpeg","size":1234 }` → returns upload instruction or `201` with media metadata.
+
+* `GET /v1/reviews/{reviewId}/media`
+  Purpose: List media attachments.
+
+* `GET /v1/media/{mediaId}`
+  Purpose: Download media (redirect to CDN/presigned URL). Supports `Range`.
+
+* `DELETE /v1/media/{mediaId}`
+  Purpose: Remove media attachment (owner or admin).
+
+* `POST /v1/media/validate`
+  Purpose: Run automated moderation checks (nudity, brand/logo detection, file integrity) and return issues.
+
+---
+
+# 6 — Moderation, policies & workflows
+
+Automated and manual moderation endpoints and metadata.
+
+* `POST /v1/moderation/queue`
+  Purpose: Enqueue review for manual moderation (admin tool). Body: `{ "review_id":"r1", "reason":"suspected_spam" }` → returns moderation task id.
+
+* `GET /v1/moderation/queue`
+  Purpose: List pending moderation tasks (filter by priority, severity, language).
+
+* `GET /v1/moderation/tasks/{taskId}`
+  Purpose: Retrieve task details (review content, automated flags, machine scores).
+
+* `POST /v1/moderation/tasks/{taskId}/review`
+  Purpose: Moderator action: `{ "action":"approve|reject|edit|escalate", "notes":"...", "edit":{"body":"sanitized text"} }` Response: update review state & audit trail.
+
+* `POST /v1/moderation/automated/policies`
+  Purpose: Create or update automated moderation rules (profanity thresholds, spam score, blacklisted words, image ML thresholds). Body: rule DSL.
+
+* `GET /v1/moderation/automated/score`
+  Purpose: Score content with moderation model (test endpoint).
+
+* `GET /v1/moderation/history`
+  Purpose: View historical moderation actions (audit log; admin only).
+
+* `POST /v1/moderation/appeals`
+  Purpose: Users appeal moderation decisions. Body: `{ "review_id":"r1","user_id":"u1","reason":"I disagree" }`. Returns appeal id and status endpoints.
+
+---
+
+# 7 — Reports / Flags / Abuse
+
+Users report reviews for policy violations.
+
+* `POST /v1/reviews/{reviewId}/flag`
+  Purpose: Flag a review. Body: `{ "user_id":"u1", "reason":"spam|abusive|off-topic|privacy", "notes":"..." }` → creates flag record.
+
+* `GET /v1/flags`
+  Purpose: Admin list of flags (filter by severity, status).
+
+* `POST /v1/flags/{flagId}/resolve`
+  Purpose: Moderator resolves a flag (action: `dismiss|remove|escalate`).
+
+---
+
+# 8 — Search, listing & faceted queries
+
+Search reviews and filter by facets.
+
+* `POST /v1/reviews/search`
+  Purpose: Advanced search with DSL. Body: `{ "product_id":"sku","q":"battery life", "filters":{ "rating":[4,5], "verified":true }, "aggs":["rating","tags"], "sort":"helpful:desc", "page":1 }` Returns `hits`, `aggregations`.
+
+* `GET /v1/reviews/summary`
+  Purpose: Quick summary (for product page): average rating, count, top tags, percent recommended.
+
+* `GET /v1/reviews/trends`
+  Purpose: Trending review topics (NLP topics/keywords) for a product or category.
+
+---
+
+# 9 — Notifications & webhooks
+
+Notify stakeholders when reviews posted, approved, or flagged.
+
+* `GET /v1/reviews/webhooks`
+  Purpose: List configured webhooks.
+
+* `POST /v1/reviews/webhooks`
+  Purpose: Create webhook: `{ "url":"https://...","events":["review.created","review.published","review.flagged","moderation.completed"], "secret":"..." }` Response: `201`.
+
+* `DELETE /v1/reviews/webhooks/{id}`
+
+* `POST /v1/reviews/notifications`
+  Purpose: Trigger internal notification (e.g. notify seller of new review). Usually internal.
+
+---
+
+# 10 — Analytics & reporting
+
+KPIs, business metrics, and export endpoints.
+
+* `GET /v1/reviews/analytics/product/{productId}`
+  Purpose: Time-series and KPIs: weekly rating avg, review volume, % verified, response latency for replies.
+
+* `GET /v1/reviews/analytics/tenant`
+  Purpose: Tenant-wide metrics: top products by review volume, avg ratings by category, moderation throughput.
+
+* `POST /v1/reviews/analytics/query`
+  Purpose: Ad-hoc analytics queries; returns CSV/JSON.
+
+* `POST /v1/reviews/exports`
+  Purpose: Export reviews/metadata to S3/CSV/Parquet for BI. Body: filters + destination; returns job id.
+
+---
+
+# 11 — Bulk operations & maintenance
+
+Backfill, recalc, and admin bulk ops.
+
+* `POST /v1/reviews/bulk/update`
+  Purpose: Bulk edit (e.g., apply tags, mark verified) — returns job id.
+
+* `POST /v1/reviews/bulk/delete`
+  Purpose: Bulk delete (admin). Job id returned.
+
+* `POST /v1/reviews/bulk/recalculate-aggregates`
+  Purpose: Recalc rating aggregates for many products (async).
+
+* `POST /v1/reviews/import`
+  Purpose: Import reviews from external sources (CSV/NDJSON) — returns job id and error report.
+
+---
+
+# 12 — Settings, templates & business rules
+
+Admin-configurable rules and templates for review display and moderation.
+
+* `GET /v1/reviews/settings`
+  Purpose: Retrieve tenant-level settings: min/max review length, require\_verified\_purchase, allow\_anonymous, reply\_policy, allowed\_media\_types.
+
+* `PATCH /v1/reviews/settings`
+  Purpose: Update settings (admin).
+
+* `GET /v1/reviews/display/templates`
+  Purpose: Get frontend display templates and metadata schemas (helps frontend render review cards).
+
+* `POST /v1/reviews/policies`
+  Purpose: Add business rules (e.g., suppress competitor mentions, country-specific requirements).
+
+---
+
+# 13 — Audit, compliance & retention
+
+Tracking changes and supporting legal requests.
+
+* `GET /v1/reviews/audit`
+  Purpose: Audit log of edits, moderation actions, deletion (admin only). Query: `actor_id`, `action`, `date_range`.
+
+* `POST /v1/reviews/retention/policy`
+  Purpose: Create retention policy (e.g., keep drafts 90 days, soft-delete after appeal windows).
+
+* `POST /v1/reviews/legal/takedown`
+  Purpose: Handle legal takedown requests; returns case id and status.
+
+---
+
+# 14 — Security & API keys
+
+Manage API keys for public read, submit, and admin.
+
+* `GET /v1/reviews/keys`
+
+* `POST /v1/reviews/keys` `{ "name":"public-widget","scopes":["read:product_reviews"], "expires_in":"30d" }` → returns plaintext key once.
+
+* `DELETE /v1/reviews/keys/{keyId}`
+
+* `GET /v1/reviews/rate-limits`
+  Purpose: Show per-key or per-tenant rate limits and usage.
+
+---
+
+# 15 — Developer & debug utilities
+
+Test moderation models, preview display, and simulate flows.
+
+* `POST /v1/reviews/test/moderation`
+  Purpose: Run a draft review through moderation sandbox and return the decisions and confidence scores.
+
+* `POST /v1/reviews/test/display`
+  Purpose: Return a rendered preview of how a review will appear given display templates and privacy settings.
+
+* `GET /v1/reviews/capabilities`
+  Purpose: Return features enabled for the tenant (media types, video support, verified purchase integration).
+
+---
+
+# Example Review resource JSON
+
+```json
+{
+  "id": "r_0001",
+  "product_id": "sku_123",
+  "user_id": "user_456",
+  "order_id": "ord_789",
+  "rating": 4,
+  "title": "Great headphones",
+  "body": "Loud and comfortable. Battery lasts two days.",
+  "recommended": true,
+  "language": "en",
+  "locale": "en-GB",
+  "verified_purchase": true,
+  "status": "published",        // pending | published | rejected | flagged | deleted
+  "helpful_count": 123,
+  "not_helpful_count": 4,
+  "replies_count": 2,
+  "media": [ { "id":"m1","type":"image","url":"https://cdn..." } ],
+  "created_at": "2025-08-29T12:00:00Z",
+  "updated_at": "2025-08-30T14:00:00Z",
+  "metadata": { "sentiment_score": 0.83, "spam_score": 0.02 }
+}
+```
+
+---
+
+# Design considerations & best practices (brief)
+
+* **Treat publishing as a workflow**: support draft → auto-moderation → manual review → published states. Keep clear audit trails.
+* **Proof-of-purchase**: integrate with Order Service to mark `verified_purchase` (but do not embed order logic here—just accept order\_id references and a verification webhook).
+* **Asynchronous & idempotent flows**: bulk import/export, media processing, moderation jobs should be async with job endpoints and stable ids.
+* **Presigned uploads & CDN**: use presigned URLs for media uploads to offload bandwidth; store media metadata in the reviews service.
+* **Machine + human moderation**: combine ML models (spam/profanity/image moderation) with human-in-the-loop tools and appeal workflows. Provide moderator UI hooks (`/moderation/queue`).
+* **Fraud & abuse detection**: rate-limit by IP, throttle anonymous posting, use device fingerprinting, pattern detection and reputation scores to reduce fake reviews.
+* **Privacy & compliance**: support redaction workflows and legal takedowns; avoid exposing PII in public endpoints (mask or remove when required).
+* **Aggregation & caching**: maintain materialized aggregates (avg rating, distribution) updated in near-real-time; provide batch recalculation endpoints.
+* **Searchable content**: index review text for faceted queries, sentiment analytics, and trending-topic extraction for product pages.
+* **Extensibility**: allow tenant-specific metadata schemas and display templates; expose capabilities endpoint so frontends can adapt.
+
+---
+
+If you want I can:
+
+* produce an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`POST /v1/reviews`, `GET /v1/products/{id}/reviews`, moderation, media upload, `POST /v1/reviews/events`),
+* design exact **request/response JSON schemas** for create/edit/reply/moderation endpoints,
+* or draft the **moderation workflow** (ML scoring thresholds, escalation rules, audit events) as a flow diagram in text.
+
+Which would you like next?

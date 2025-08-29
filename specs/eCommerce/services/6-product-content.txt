@@ -1,0 +1,346 @@
+# Product Content / Product Information Management (PIM) Service — REST API endpoints
+
+Nice — below is a focused, production-ready REST surface for the **Product Content / PIM Service** (the system that owns rich product content: long descriptions, structured specs, rich media composition, copy & translations, content blocks/variants, editorial workflow, content relationships, product-level SEO, marketing copy, and published snapshots used by storefronts).
+**This service does not** manage pricing, inventory/stock, carts, orders, or checkout — those are separate services.
+
+Base path assumption: `/api/v1` and resources are store-scoped: `/api/v1/stores/{storeId}/...`. Common auth scopes used in examples: `pim:read`, `pim:write`, `pim:publish`, `pim:admin`. All list endpoints support `page`/`per_page` (or cursor) and `sort`.
+
+---
+
+## Overview / semantics
+
+* Primary resource: **product content** (product content record that references canonical `product_id` from Product Service and optionally references SKUs/variants by id).
+* Content model: `content` supports structured fields (rich text blocks, specs tables, bullets, key-value specs), named content variants (e.g., `marketing`, `technical`, `brief`), channels/locales, and translations.
+* Publishing: PIM stores drafts and publishes content snapshots per channel/locale. Published snapshots are what storefronts read (via Store/Edge or Content Feed).
+* Media: PIM references Asset/Media Service IDs (does not hold binary content unless explicitly requested).
+* Workflows: supports editorial workflow (draft → review → approved → published) with audit trail and versioning.
+
+---
+
+# Endpoints
+
+## Product Content CRUD
+
+Manage product content records (one or many content items per product, identified by `content_id`).
+
+* `POST /stores/{storeId}/products/{productId}/content`
+  Create a content item. Body: `{title, handle, variant:"marketing|technical|brief", blocks:[...], specs:{}, excerpts, authors:[user_id], status: draft|in_review|approved|published, metadata}`.
+  Auth: `pim:write`
+  Returns: `201 Created` with content object.
+
+* `GET /stores/{storeId}/products/{productId}/content`
+  List content items for product. Query: `variant`, `status`, `locale`, `channel_id`, `q`, `include=versions,authors`.
+  Auth: `pim:read`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}`
+  Get full content item (structured blocks, specs, translations, version info). Option: `?include=published_snapshot,versions,workflow`.
+  Auth: `pim:read`
+
+* `PATCH /stores/{storeId}/products/{productId}/content/{contentId}`
+  Partial update (blocks, metadata, status). Use `If-Match`/ETag for optimistic concurrency.
+  Auth: `pim:write`
+
+* `PUT /stores/{storeId}/products/{productId}/content/{contentId}`
+  Replace content item.
+  Auth: `pim:admin`
+
+* `DELETE /stores/{storeId}/products/{productId}/content/{contentId}`
+  Soft-delete content item (archive). Query `hard=true` to permanently delete.
+  Auth: `pim:admin`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/restore`
+  Restore soft-deleted item.
+  Auth: `pim:admin`
+
+* `GET /stores/{storeId}/content/search?q=...`
+  Admin search across content items (filters: `variant,status,author,channel,locale`).
+  Auth: `pim:read`
+
+---
+
+## Structured Blocks & Content Types
+
+Define / manage reusable content block types and templates used in content items (hero, spec-table, image-gallery, FAQ, comparison table).
+
+* `POST /stores/{storeId}/content-block-types`
+  Create a block type. Body: `{key,name,schema,ui_widget,validation,metadata}`.
+  Auth: `pim:admin`
+
+* `GET /stores/{storeId}/content-block-types`
+  List block types.
+
+* `GET /stores/{storeId}/content-block-types/{typeKey}`
+  Get schema & UI hints for block type (used by editors).
+  Auth: `pim:read`
+
+* `PATCH /stores/{storeId}/content-block-types/{typeKey}`
+  Update block type schema (versioned — breaking changes create new block-type version).
+  Auth: `pim:admin`
+
+* `DELETE /stores/{storeId}/content-block-types/{typeKey}`
+  Deprecate or remove block type (validate consumers).
+  Auth: `pim:admin`
+
+---
+
+## Versions, Drafts & Snapshots
+
+Versioning for content: every change creates a version; publishing creates a snapshot used by storefronts.
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/versions`
+  List versions (id, author, message, created\_at).
+  Auth: `pim:read`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/versions/{versionId}`
+  Get specific version payload & diff metadata.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/versions/{versionId}/restore`
+  Restore a version to become current draft.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/published`
+  Get published snapshot(s). Option: `?channel_id=&locale=` to fetch per-scope snapshot. Returns snapshot metadata and signed `snapshot_id`.
+  Auth: `pim:read` (public reads can be served by CDN via Store/Edge)
+
+* `GET /stores/{storeId}/content/snapshots/{snapshotId}`
+  Retrieve a published snapshot (useful for edge/preview while authenticating).
+  Auth: `pim:read` or public if snapshot publicly published
+
+---
+
+## Publishing & Preview
+
+Publish content to channels/locales and produce preview tokens for QA.
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/publish`
+  Publish content. Body: `{channel_ids:[],locale:,publish_message:,publish_at?:ISO8601,force?:bool}`. Returns `publish_job_id` (async).
+  Auth: `pim:publish`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/unpublish`
+  Unpublish from channels/locales. Body: `{channel_ids:[],locale:}`.
+  Auth: `pim:publish`
+
+* `GET /stores/{storeId}/products/{productId}/content/publish-status?job_id=...`
+  Check publish job status and logs.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/preview`
+  Create preview URL/token. Body: `{expires_in_seconds, channel_id, locale, user_id_for_preview}`. Response: `{preview_url, token, expires_at}`. (Preview URLs should be signed).
+  Auth: `pim:read` or `pim:write` (to create preview)
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/render?channel_id=&locale=&preview_token=`
+  Server-side-rendered preview of content (HTML or JSON). Auth via `preview_token` (otherwise require `pim:read`).
+
+---
+
+## Translations & Localizations
+
+Manage translations of content fields and localized snapshots.
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/translations`
+  List locales available.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/translations/{locale}`
+  Create/update translation for locale. Body: localized fields/blocks. Supports `translation_source` metadata and `review_status`.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/translations/{locale}`
+  Get translation payload & status.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/translations/{locale}/export`
+  Export translation package (XLIFF/CSV/JSON) for external translators. Returns `export_job_id`.
+  Auth: `pim:admin`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/translations/{locale}/import`
+  Import translated package (XLIFF/CSV). Returns `import_job_id`.
+  Auth: `pim:admin`
+
+---
+
+## Editorial Workflow & Approvals
+
+Support review states, comments, assignments, and approvals.
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/workflow/transition`
+  Change workflow state. Body: `{from:'draft',to:'in_review',comment:,assigned_to:user_id}`. System enforces allowed transitions. Returns updated workflow status.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/workflow`
+  Get current workflow state, history, assignees, due dates.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/comments`
+  Add review comment. Body: `{author_id, text, context_block_id?, resolved:false}`.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/comments`
+  List comments & review threads.
+  Auth: `pim:read`
+
+* `POST /stores/{storeId}/workflows/templates`
+  Create workflow templates (stages, roles, SLA).
+  Auth: `pim:admin`
+
+---
+
+## Media & Assets (references to Asset Service)
+
+PIM references assets (images, video) via asset IDs; where necessary it can request signed URLs.
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/assets`
+  Attach asset by `asset_id` and set usage (hero, gallery, spec\_image, video). Body: `{asset_id, role, alt_text, position}`.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/assets`
+  List attached assets (returns asset IDs & metadata). Option `?signed=true` to return signed URLs from Asset Service (proxy).
+  Auth: `pim:read`
+
+* `DELETE /stores/{storeId}/products/{productId}/content/{contentId}/assets/{assetId}`
+  Detach asset. (Does not delete from Asset Service.)
+  Auth: `pim:write`
+
+---
+
+## Rich Specifications & Key-Value Specs
+
+Structured technical/spec tables and JSON specs attached to content.
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/specs`
+  Return structured specs (typed key/value list, units).
+  Auth: `pim:read`
+
+* `PATCH /stores/{storeId}/products/{productId}/content/{contentId}/specs`
+  Upsert specs (validate against attribute/schema service for type/unit where applicable).
+  Auth: `pim:write`
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/specs/validate`
+  Validate specs payload (useful before import). Returns `valid` + `errors`.
+  Auth: `pim:read`
+
+---
+
+## Relations, Cross-sells & Content Bundles
+
+Manage content-level relationships (comparison charts, variant content grouping, bundles marketing copy).
+
+* `POST /stores/{storeId}/products/{productId}/content/{contentId}/relations`
+  Add relation. Body: `{type:'comparison|accessory|alternate', related_product_id, position, metadata}`.
+  Auth: `pim:write`
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/relations`
+  List related items.
+  Auth: `pim:read`
+
+* `DELETE /stores/{storeId}/products/{productId}/content/{contentId}/relations/{relationId}`
+  Remove relation.
+  Auth: `pim:write`
+
+---
+
+## Search / Indexing / Export to Search or Edge
+
+PIM triggers indexing to Search/Edge or provides published snapshots for the storefront.
+
+* `POST /stores/{storeId}/content/index`
+  Trigger reindexing of content into Search/Edge. Body: `{product_ids[], full:boolean}` returns `job_id`.
+  Auth: `pim:admin`
+
+* `GET /stores/{storeId}/content/index/{jobId}`
+  Check index job.
+  Auth: `pim:read`
+
+* `GET /stores/{storeId}/content/feed?channel_id=&locale=&since=`
+  Public feed (or signed feed) of published snapshots for consumption by CDN/edge/Storefront. Pagination and `since` for incremental sync.
+  Auth: public for published feed or `pim:read` if auth required
+
+---
+
+## Import / Export / Bulk Jobs
+
+Large content migration and bulk-edit operations.
+
+* `POST /stores/{storeId}/content/import`
+  Import product content (ZIP/JSON/XLIFF). Options: `mode=upsert|replace`, `validate_only`. Returns `import_job_id`.
+  Auth: `pim:admin`
+
+* `GET /stores/{storeId}/content/import/{jobId}`
+  Import job status & error report (downloadable).
+  Auth: `pim:admin`
+
+* `POST /stores/{storeId}/content/export`
+  Export content for a set of products or channel/locale. Returns `export_job_id` and signed download link when ready.
+  Auth: `pim:read` or `pim:admin`
+
+* `POST /stores/{storeId}/content/bulk`
+  Bulk patch operations (JSON operations list). Returns `bulk_job_id`.
+  Auth: `pim:admin`
+
+* `GET /api/v1/stores/{storeId}/jobs/{jobId}`
+  Generic job status endpoint: `{job_id,status,progress,errors,result_url}`.
+  Auth: `pim:read`
+
+---
+
+## Audit Logs & History
+
+Track all changes to content for compliance & rollback.
+
+* `GET /stores/{storeId}/products/{productId}/content/{contentId}/audit-logs`
+  List audit entries (actor, action, before/after, timestamp).
+  Auth: `pim:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/content/audit-logs`
+  Search content-level audit logs across store (filters: `actor,action,product_id,since,until`).
+  Auth: `pim:admin`
+
+---
+
+## Webhooks & Events
+
+Notify other systems on content lifecycle events (useful for search reindex, cache invalidation, email/marketing triggers).
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook. Events examples: `content.created`, `content.updated`, `content.published`, `content.unpublished`, `content.version.created`, `content.translation.imported`. Body: `{url,events,secret,active,filters}`.
+  Auth: `pim:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Inspect delivery attempts & failures.
+  Auth: `pim:admin`
+
+---
+
+## Helpers & Admin Utilities
+
+* `GET /stores/{storeId}/products/{productId}/content/template?variant=marketing` — return default content template (blocks & hints) for that product-type/variant.
+* `GET /stores/{storeId}/content/resolve?handles=foo,bar` — bulk-resolve content by handle(s).
+* `GET /stores/{storeId}/content/duplicates?threshold=...` — detect likely duplicate copies across products (helpful for cleanup).
+* `GET /stores/{storeId}/content/diagnostics` — health & metrics (pending publish jobs, translations queue length). Auth: `pim:admin`.
+* `GET /stores/{storeId}/content/preview-stats` — recent preview uses and token expiry audit. Auth: `pim:read`.
+
+---
+
+## Cross-cutting considerations & best practices (short)
+
+1. **Separation of concerns:** PIM stores editorial content and snapshots only. Referential links to Product/SKU/Asset are allowed but authoritative data (price, stock) lives in other services.
+2. **Publish model:** support per-channel & per-locale publish snapshots. Published snapshots are immutable (for reproducible storefront renders) and referenced by `snapshot_id`.
+3. **ETags & optimistic concurrency:** use `ETag`/`If-Match` on updates to avoid edit conflicts in collaborative environments.
+4. **Drafts & approvals:** support drafts and editorial workflow with role-based permissions and audit logs.
+5. **Preview tokens:** preview URLs must be signed, short-lived, and scoped to a user/role for security.
+6. **Schema-driven blocks:** expose block-type schemas to editors so UIs can render forms dynamically (integrate with Attributes/Schema Service if you have one).
+7. **Async jobs:** imports, exports, index and publish operations should be async and return `job_id` with a central jobs endpoint.
+8. **Localization first:** design content blocks to support localized fields and provide robust translation import/export (XLIFF support).
+9. **CDN & cache-friendly feeds:** published snapshots should be available via a feed or edge-compatible endpoint for high-performance storefronts.
+10. **Webhooks & events:** strongly recommended to emit events for `content.published` and `content.updated` so Search/Storefront/Marketing services can react.
+11. **Validation:** validate structured specs against attribute definitions (if Attribute Service exists) and expose a `validate` endpoint for editor UIs and import pipelines.
+
+---
+
+Want me to:
+
+* generate OpenAPI (Swagger) snippets for the most-used endpoints (create/update/publish/preview/import), or
+* produce example JSON schemas for `contentItem`, `contentBlock`, `publishedSnapshot`, and `publishJob`?
+
+Pick one and I’ll produce it immediately.

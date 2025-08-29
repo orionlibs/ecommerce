@@ -1,0 +1,325 @@
+Nice — let’s design a focused, production-ready REST surface for the **SKU & Variant Service**. This service owns SKU-level and variant-level metadata that is *separate* from Inventory, Pricing, Orders, or Cart responsibilities. It stores identifiers, dimensional and regulatory data, packaging, marketplace mappings, variant attributes (option values), and any SKU-level assets / lifecycle metadata used by other services.
+
+Base path assumption: `/api/v1` (adjust as needed). All endpoints require authentication; I’ll call out suggested auth scopes (e.g. `sku:read`, `sku:write`, `sku:admin`). All list endpoints support pagination (`page`/`per_page` or cursor), `sort`, and common filters.
+
+# SKU & Variant Service — REST endpoints
+
+---
+
+## Core SKUs (logical SKU records)
+
+A SKU represents the sellable unit identifier and its metadata (SKU code, GTINs, barcodes, packaging, dimensions, manufacturer data, etc.).
+
+* `POST /stores/{storeId}/skus`
+  Create a SKU. Body highlights: `sku` (string, unique per store), `product_id` (canonical product reference), `variant_key` (optional, e.g., color\:blue|size\:M), `title`, `description`, `manufacturer` (id or name), `mpn`, `gtin`/`ean`/`upc` (array), `barcode` (string), `sku_type` (`standard|bundle|kit|virtual`), `status` (`draft|active|retired`), `release_date`, `discontinue_date`, `metadata` (free JSON), `default_image_id`.
+  Auth: `sku:write` or `sku:admin`
+  Response: `201 Created` with SKU resource.
+
+* `GET /stores/{storeId}/skus`
+  List SKUs. Query filters: `q` (full-text), `sku`, `product_id`, `gtin`, `barcode`, `manufacturer`, `status`, `sku_type`, `created_after`, `updated_before`, `attribute:<key>=<value>`, `marketplace=<marketplaceId>`, `include` (e.g., `assets,mappings`).
+  Auth: `sku:read`
+
+* `GET /stores/{storeId}/skus/{skuId}`
+  Get SKU details (all identifiers, attributes, packaging, regulatory fields, asset refs, marketplace mappings). Option: `?include=audit,assets,mappings`.
+  Auth: `sku:read`
+
+* `PATCH /stores/{storeId}/skus/{skuId}`
+  Partial update (title, identifiers, metadata, status). Support `If-Match` / ETag.
+  Auth: `sku:write`
+
+* `PUT /stores/{storeId}/skus/{skuId}`
+  Replace SKU representation (rare).
+  Auth: `sku:admin`
+
+* `DELETE /stores/{storeId}/skus/{skuId}`
+  Soft-delete or retire SKU; query `hard=true` for permanent deletion. Validate no blocking references elsewhere.
+  Auth: `sku:admin`
+
+* `POST /stores/{storeId}/skus/{skuId}/restore`
+  Restore a soft-deleted SKU.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/skus/{skuId}/history`
+  Version history / audit diffs for SKU changes.
+  Auth: `sku:read` or `compliance:read`
+
+---
+
+## Variant Records (option-value based variants)
+
+If a product has multiple option axes (size/color), the variant resource captures the structured option values and maps to one or more SKUs (some systems separate variant record from SKU — include both to support complex needs).
+
+* `POST /stores/{storeId}/variants`
+  Create variant. Body: `product_id`, `variant_key` (canonical key), `options` (array of `{name, value}`, e.g., `[{name:"color",value:"red"},{name:"size",value:"M"}]`), `sku_id` (optional link to SKU), `attributes` (variant-level attributes), `default_image_id`, `status`.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/variants`
+  List variants. Filters: `product_id`, `sku`, `option.<name>=<value>`, `status`. Supports include `sku,assets`.
+  Auth: `sku:read`
+
+* `GET /stores/{storeId}/variants/{variantId}`
+  Get variant details (option matrix, linked SKUs, attributes).
+  Auth: `sku:read`
+
+* `PATCH /stores/{storeId}/variants/{variantId}`
+  Update variant (options, links to SKUs, attributes).
+  Auth: `sku:write`
+
+* `DELETE /stores/{storeId}/variants/{variantId}`
+  Remove variant (validate dependencies).
+  Auth: `sku:admin`
+
+* `POST /stores/{storeId}/variants/bulk`
+  Bulk create/update variants for a product (JSON/CSV). Returns `job_id`.
+  Auth: `sku:admin`
+
+---
+
+## SKU Identifiers & GS1 / Barcode management
+
+Manage GTINs, EANs, UPCs, serialisation scheme references (metadata only; actual serial issuance is Inventory/IMS's job).
+
+* `POST /stores/{storeId}/skus/{skuId}/identifiers`
+  Add identifier. Body: `{type: "gtin|ean|upc|isbn|barcode", value, issuer, assigned_at}`.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/skus/{skuId}/identifiers`
+  List identifiers for SKU.
+
+* `DELETE /stores/{storeId}/skus/{skuId}/identifiers/{identifierId}`
+  Remove identifier.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/identifiers/validate?type=gtin&value=...`
+  Validate format and checksum for common identifier types (helpful for admin UI).
+  Auth: `sku:read`
+
+---
+
+## Packaging, Dimensions & Logistics Metadata
+
+Dimensions, weight, packaging unit (case/inner/each), hazardous indicators, HTS/HS codes, country of origin.
+
+* `GET /stores/{storeId}/skus/{skuId}/logistics`
+  Retrieve dimensions, weight, package breakdown, palletization hints, hs\_code, country\_of\_origin, dangerous\_goods flag, handling\_instructions.
+  Auth: `sku:read`
+
+* `PATCH /stores/{storeId}/skus/{skuId}/logistics`
+  Update logistics metadata (no inventory effects).
+  Auth: `sku:write`
+
+* `POST /stores/{storeId}/skus/{skuId}/packaging`
+  Create packaging templates (e.g., `each`, `case`, `pallet`) referencing quantities & dimensions.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/packaging-templates`
+  List packaging templates available to store.
+  Auth: `sku:read`
+
+---
+
+## Asset / Documentation attachments (spec sheets, CAD, images)
+
+SKU-level assets: spec sheets, safety data sheets, high-res images. You may integrate with Asset Service (store only references asset IDs).
+
+* `POST /stores/{storeId}/skus/{skuId}/assets`
+  Attach asset (file upload or asset-service reference). Body: `asset_id` or multipart `file`, `type` (`image|spec|safety|cad`), `alt_text`, `position`. Returns asset id & signed link.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/skus/{skuId}/assets`
+  List SKU assets.
+
+* `PATCH /stores/{storeId}/skus/{skuId}/assets/{assetId}`
+  Update asset metadata (alt\_text, position).
+  Auth: `sku:write`
+
+* `DELETE /stores/{storeId}/skus/{skuId}/assets/{assetId}`
+  Remove attachment.
+  Auth: `sku:admin`
+
+---
+
+## Channel & Marketplace SKU mappings
+
+Map local SKU to channel-specific identifiers (marketplace SKUs, seller SKUs, marketplace product IDs). Important for multi-channel synchronization (this service only stores mapping metadata; feed generation is another service).
+
+* `POST /stores/{storeId}/skus/{skuId}/mappings`
+  Add mapping. Body: `channel_id` or `marketplace` (e.g., `amazon_us`), `external_sku`, `external_product_id`, `notes`, `configuration` (marketplace-specific flags).
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/skus/{skuId}/mappings`
+  List mappings.
+
+* `DELETE /stores/{storeId}/skus/{skuId}/mappings/{mappingId}`
+  Remove mapping.
+  Auth: `sku:write`
+
+* `GET /stores/{storeId}/marketplace-mappings?marketplace=amazon_us&external_sku=...`
+  Lookup mappings (handy for inbound marketplace webhooks).
+  Auth: `sku:read`
+
+---
+
+## Attribute Values & Variant Option Definitions (variant-level attributes)
+
+Manage variant option schemas and allowed values (e.g., color, size) that are used to create variants and SKUs.
+
+* `POST /stores/{storeId}/option-sets`
+  Create an option set. Body: `name`, `handle`, `options` (ordered list of `{name, values[]}`), `metadata`. Example: `Size: [S,M,L]`, `Color: [Red,Blue]`.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/option-sets`
+  List option sets.
+
+* `GET /stores/{storeId}/option-sets/{id}`
+  Get option set details.
+
+* `PATCH /stores/{storeId}/option-sets/{id}`
+  Update option values (add/remove).
+  Auth: `sku:admin`
+
+* `DELETE /stores/{storeId}/option-sets/{id}`
+  Delete option set (validate dependents).
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/option-values?key=color`
+  Return all used option values across SKUs (helpful for filters and UI).
+
+---
+
+## Bundles & Composite SKUs (metadata only)
+
+If the SKU service stores metadata for bundle SKUs (composition), keep only composition & rules here. Pricing and fulfillment logic belong elsewhere.
+
+* `POST /stores/{storeId}/bundles`
+  Create bundle SKU metadata. Body: `sku`, `components` (array of `{sku_id, variant_id?, qty}`), `bundle_rules` (optional), `unit_handling`.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/bundles/{bundleId}`
+  Get bundle metadata (component list).
+  Auth: `sku:read`
+
+* `PATCH /stores/{storeId}/bundles/{bundleId}`
+  Update composition.
+  Auth: `sku:admin`
+
+* `DELETE /stores/{storeId}/bundles/{bundleId}`
+  Remove bundle record.
+  Auth: `sku:admin`
+
+Note: actual inventory reservation or BOM consumption is Inventory Service's responsibility.
+
+---
+
+## Search, Indexing & Admin Helpers
+
+Admin search and indexing hooks to integrate with Search/Feed/Export services.
+
+* `GET /stores/{storeId}/skus/search`
+  Advanced search on SKU fields, facets on `manufacturer`, `status`, `sku_type`, `option values`. Supports `include=assets,mappings`.
+  Auth: `sku:read`
+
+* `POST /stores/{storeId}/skus/index`
+  Trigger reindex into search or push updates to downstream systems. Body: `sku_ids[]` or `full=true`. Returns `job_id`.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/skus/index/jobs/{jobId}`
+  Index job status.
+  Auth: `sku:read`
+
+---
+
+## Bulk Import / Export & Jobs
+
+Large catalog operations.
+
+* `POST /stores/{storeId}/skus/import`
+  Import SKUs (CSV/JSON/ZIP). Options: `mode=append|upsert|replace`, `skip_invalid`. Returns `import_job_id`.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/skus/import/{jobId}`
+  Import job status & error report.
+
+* `POST /stores/{storeId}/skus/export`
+  Export SKUs (filters, includes). Returns `export_job_id` and signed download link when ready.
+  Auth: `sku:read` or `sku:admin`
+
+* `GET /stores/{storeId}/skus/export/{jobId}`
+  Export job status & link.
+
+* `POST /stores/{storeId}/skus/bulk`
+  Bulk patch operations (JSON operations list). Returns `bulk_job_id`.
+  Auth: `sku:admin`
+
+---
+
+## Audit Logs & Change History
+
+Immutable logs for compliance and traceability.
+
+* `GET /stores/{storeId}/skus/{skuId}/audit-logs`
+  List audit events for SKU. Query: `actor_id`, `since`, `until`.
+  Auth: `sku:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/skus/audit-logs`
+  Search SKU-level audit logs across the store.
+
+---
+
+## Webhooks & Events
+
+Emit SKU and variant events for downstream systems (search, storefront, feed generator).
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhooks (could be unified with Store/Product webhooks). Events: `sku.created`, `sku.updated`, `sku.deleted`, `variant.created`, `variant.updated`, `bundle.updated`, `identifier.added`.
+  Auth: `sku:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Delivery attempts & failures.
+  Auth: `sku:admin`
+
+---
+
+## Validation / Conflict Helpers
+
+Useful endpoints for UIs to validate uniqueness and conflicts without attempting a write.
+
+* `GET /stores/{storeId}/skus/exists?sku=ABC123`
+  Quick existence check (returns SKU id if exists).
+  Auth: `sku:read`
+
+* `POST /stores/{storeId}/skus/validate`
+  Validate a proposed SKU payload (checks SKU uniqueness, GTIN checksum, required option combos, attribute constraints). Returns `valid: true/false` plus `errors[]`.
+  Auth: `sku:read`
+
+---
+
+## Cross-cutting & Operational endpoints
+
+* `GET /stores/{storeId}/skus/diagnostics` — basic health & metrics for SKU service (counts, index lag). Auth: `sku:admin`
+* `GET /stores/{storeId}/skus/usage` — counts and quotas for SKU records (if multi-tenant quotas apply). Auth: `billing:read` or `sku:admin`
+
+---
+
+## Design considerations & constraints (short)
+
+1. **Separation of concerns**: This service stores SKU metadata and variant structure only. *Do not* store inventory levels (Inventory Service), price data (Pricing Service), or checkout rules (Order/Cart Service).
+2. **Identifiers**: SKU uniqueness must be enforced per store. Provide ability to store multiple GS1 identifiers per SKU (GTIN/EAN/UPC) and enable validation endpoints.
+3. **Variant vs SKU**: Support both variant records (option-values) and SKU records (unique sellable unit). A variant may map to one SKU; systems that require one-to-many or many-to-one mappings should be supported.
+4. **Extensible attributes**: support arbitrary `metadata` plus typed attribute definitions (enum/number/string) for strong validation.
+5. **Optimistic concurrency**: ETag / `If-Match` on updates to avoid accidental overwrite when multiple admins edit.
+6. **Async Jobs**: imports/exports/indexing must return `job_id` and job status endpoints.
+7. **Audit & Compliance**: every mutation must be logged (who, when, before/after).
+8. **Integrations**: mappings for marketplaces and channel-specific SKUs are metadata only — sync execution and feed building is handled by separate Feed/Integration services.
+9. **Security & scopes**: granular scopes — `sku:read`, `sku:write`, `sku:admin`, with additional scopes for asset operations if assets are stored here.
+10. **Public reads**: public storefronts should read published SKU snapshots through Product/Storefront/Feed/Cache layers for performance; this service is admin/config focused.
+
+---
+
+Would you like me to:
+
+* generate OpenAPI (Swagger) snippets for the primary endpoints (`/skus`, `/variants`, `/identifiers`, `/import`) — ready to drop into a spec, or
+* produce JSON schema examples for `sku` and `variant` resources, or
+* design the `job` status schema used for async imports/exports/indexing?
+
+Pick one and I’ll produce it immediately.

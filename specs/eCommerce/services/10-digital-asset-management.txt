@@ -1,0 +1,415 @@
+# Media / DAM service — REST API surface
+
+Nice — here’s a comprehensive, practical RESTful API design for a Media / Digital Asset Management (DAM) service. I’ll include only endpoints relevant to the DAM (assets, renditions/derivatives, metadata, collections, search, upload, access/sharing, jobs, webhooks, audit/usage, lifecycle, import/export, CDN integration, and admin/settings). For each endpoint I show: HTTP method, canonical path, short purpose, common query params or body fields you’ll need, and typical responses/status codes.
+
+Common notes (applies to many endpoints)
+
+* Base path: `https://api.example.com/v1`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT)
+* Common query params: `page`, `limit`, `sort`, `fields` (select specific fields), `expand` (expand related objects), `q` (full-text), `cursor` (cursor pagination alternative).
+* Common paging headers: `X-Total-Count`, `Link` or cursor tokens in body.
+* Standard responses: `200 OK`, `201 Created`, `204 No Content`, `400/401/403/404/409/422/429/500`.
+* Use `Content-Type: application/json` for JSON bodies. Uploads use `multipart/form-data` or presigned PUT/S3/Tus-style resumable flows.
+
+---
+
+# 1. Asset lifecycle (core asset CRUD + retrieval)
+
+### Create / Upload (multiple supported flows)
+
+1. `POST /v1/assets`
+
+   * Purpose: Create asset metadata and trigger an upload flow (returns an upload token or presigned URL).
+   * Body (json): `{ "filename": "hero.jpg", "mime_type":"image/jpeg", "size":12345, "collection_id": "...", "metadata": {...}, "visibility": "private|public" }`
+   * Response: `201` with `{ "id","status":"upload_pending","upload": { "type":"presigned","url":"...", "method":"PUT", "headers": {...}, "expires_at":"..." } }`
+
+2. `PUT /v1/assets/{assetId}/upload` (optional multipart direct upload)
+
+   * Purpose: Server-side endpoint to accept file bytes (if not using presigned).
+   * Request: `multipart/form-data` file field.
+   * Response: `200` with asset status `processing` or `ready`.
+
+3. `POST /v1/uploads/tus` or `POST /v1/uploads/resumable`
+
+   * Purpose: Initiate resumable upload (returns upload id / tus URL).
+   * Useful for large video files.
+
+4. `POST /v1/assets/bulk`
+
+   * Purpose: Bulk create metadata + presigned URLs for many assets.
+   * Response: array of upload instructions.
+
+### Finalize / Confirm upload
+
+5. `POST /v1/assets/{assetId}:complete-upload`
+
+   * Purpose: Notify DAM that upload finished (triggers ingestion/transcoding/derivatives).
+   * Body: optional checksum.
+   * Response: `200` with updated asset status.
+
+### Read / Retrieve asset metadata
+
+6. `GET /v1/assets/{assetId}`
+
+   * Purpose: Get full metadata, status, available renditions, versions, and ACLs.
+   * Query: `fields`, `expand=versions,renditions,collection`.
+   * Response: asset JSON.
+
+### Download / Stream content
+
+7. `GET /v1/assets/{assetId}/download`
+
+   * Purpose: Redirects / proxied download of original file (supports signed URLs).
+   * Query: `disposition=attachment|inline`, `filename=...`, `expires_in=3600` (if requesting a signed temporary URL).
+   * Response: `302` redirect to CDN/presigned URL or `200` stream (supports `Range` header for partial content).
+
+8. `GET /v1/assets/{assetId}/content`
+
+   * Purpose: Proxy raw bytes (useful for clients without direct CDN access). Supports `Range`.
+
+### Update metadata
+
+9. `PATCH /v1/assets/{assetId}`
+
+   * Purpose: Partial update of metadata, title, description, custom fields, visibility.
+   * Body: partial JSON Patch or merge style `{ "metadata": {...}, "title":"..." }`.
+   * Response: `200` updated asset.
+
+### Delete / Archive
+
+10. `DELETE /v1/assets/{assetId}`
+
+    * Purpose: Soft-delete or hard-delete depending on query.
+    * Query: `hard=true` to permanently remove (subject to retention).
+    * Response: `204`.
+
+11. `POST /v1/assets/{assetId}:restore`
+
+    * Purpose: Restore a soft-deleted asset.
+    * Response: `200`.
+
+### Versions
+
+12. `GET /v1/assets/{assetId}/versions`
+
+    * Purpose: List previous versions (when file replaced).
+13. `GET /v1/assets/{assetId}/versions/{versionId}`
+14. `POST /v1/assets/{assetId}/versions`
+
+    * Purpose: Upload a new version (similar to create + finalize).
+15. `POST /v1/assets/{assetId}/versions/{versionId}:promote`
+
+    * Purpose: Promote a historical version to current.
+
+---
+
+# 2. Renditions / Derivatives / Transformations
+
+(Images resized, webp versions, thumbnails; video transcodes; PDFs previews)
+
+1. `GET /v1/assets/{assetId}/renditions`
+
+   * Purpose: List available renditions (thumbnail, small, medium, web-optimized, etc.)
+
+2. `GET /v1/assets/{assetId}/renditions/{renditionId}`
+
+   * Purpose: Metadata about a rendition (size, mime, url, created\_at).
+
+3. `GET /v1/assets/{assetId}/renditions/{renditionId}/download`
+
+   * Purpose: Download rendition or get presigned url.
+
+4. `POST /v1/assets/{assetId}/renditions`
+
+   * Purpose: Request generation of custom rendition by parameters (e.g. `{"type":"image","ops":[{"resize":{"w":800,"h":600}},{"format":"webp"}]}` or `{"preset":"thumbnail"}`)
+   * Response: job id.
+
+5. `POST /v1/assets/{assetId}/transform?inline=true`
+
+   * Purpose: On-the-fly transient transformation (no persistent rendition) — returns presigned URL for result.
+
+6. `GET /v1/transformations/presets` and `POST /v1/transformations/presets`
+
+   * Purpose: Manage named presets (thumbnail\_small, preview\_1080p, etc.)
+
+---
+
+# 3. Collections / Folders / Albums
+
+1. `GET /v1/collections`
+
+   * List collections/folders with paging, filtering by owner, permissions.
+
+2. `POST /v1/collections`
+
+   * Create collection (name, description, parent\_id, visibility, metadata).
+
+3. `GET /v1/collections/{id}`
+
+4. `PATCH /v1/collections/{id}`
+
+5. `DELETE /v1/collections/{id}`
+
+6. `POST /v1/collections/{id}/assets`
+
+   * Add assets to collection (bulk add by ids).
+
+7. `DELETE /v1/collections/{id}/assets`
+
+   * Remove assets (accepts list of asset ids).
+
+8. `GET /v1/collections/{id}/assets`
+
+   * List assets in a collection with filters & sort.
+
+---
+
+# 4. Tags, Taxonomy & Metadata schema
+
+1. `GET /v1/tags`
+
+2. `POST /v1/tags`
+
+3. `GET /v1/tags/{tagId}`
+
+4. `PATCH /v1/tags/{tagId}`
+
+5. `DELETE /v1/tags/{tagId}`
+
+6. `POST /v1/assets/{assetId}/tags` `{ "tags":[ "summer", "hero" ] }`
+
+7. `DELETE /v1/assets/{assetId}/tags/{tag}`
+
+8. Metadata schema management:
+
+* `GET /v1/metadata/schemas`
+* `POST /v1/metadata/schemas` (define custom fields, types, required, validation)
+* `GET /v1/metadata/schemas/{schemaId}`
+* `PATCH /v1/metadata/schemas/{schemaId}`
+* `DELETE /v1/metadata/schemas/{schemaId}`
+
+Assets can reference schema: `asset.metadata` must validate.
+
+---
+
+# 5. Search & Filtering
+
+1. `GET /v1/assets/search`
+
+   * Purpose: powerful full-text + faceted search.
+   * Query body or query params: `q` (text), filters like `mime_type`, `tags`, `collection_id`, `created_after`, `size_gt`, `owner`, `metadata.custom_field:value`, `has_rendition=true`.
+   * Supports boolean operators, fuzzy match, sort by relevance/date/size.
+   * Response: paged list + aggregations/facets (tag counts, mime-type counts).
+
+2. `GET /v1/assets/advanced-search` (POST with complex DSL)
+
+   * Purpose: Accept a JSON DSL for boolean search, nested metadata queries, date ranges, geo filters for geotagged assets.
+
+---
+
+# 6. Jobs / Asynchronous processing
+
+(Transcoding, OCR, tagging, face detection, metadata extraction)
+
+1. `GET /v1/jobs` — list jobs (filter by type/status/asset\_id)
+2. `GET /v1/jobs/{jobId}` — job status, logs, result references
+3. `POST /v1/assets/{assetId}/jobs` — create processing job (type: `transcode`, `thumbnail`, `ocr`, `detect_faces`, `auto_tag`, `color_extraction`, `policy_validation`) with params/presets
+4. `DELETE /v1/jobs/{jobId}` — cancel job
+
+Job examples:
+
+* Body: `{ "type":"transcode", "preset":"h264_1080p", "notify_webhook": true }`
+
+---
+
+# 7. Sharing, signed links, access control, ACLs
+
+1. `POST /v1/assets/{assetId}/share`
+
+   * Purpose: Create a shareable link. Body: `{ "expires_in":3600, "allow_download": true, "password": "optional" }`
+   * Response: `{ "share_id","url","expires_at" }`
+
+2. `GET /v1/shares/{shareId}`
+
+3. `PATCH /v1/shares/{shareId}`
+
+4. `DELETE /v1/shares/{shareId}`
+
+5. ACL-based:
+
+* `GET /v1/assets/{assetId}/acl`
+* `POST /v1/assets/{assetId}/acl` `{ "principal_type":"user|group|role","principal_id":"...","permissions":["read","download","edit","delete"] }`
+* `PATCH /v1/assets/{assetId}/acl/{aclId}`
+* `DELETE /v1/assets/{assetId}/acl/{aclId}`
+
+6. Temporary signed URL issuance:
+
+* `POST /v1/assets/{assetId}/signed-url` `{ "operation":"download|view","expires_in":3600 }` → returns `{ "url":"..." }`
+
+7. Permission introspection:
+
+* `GET /v1/permissions/me?asset_id=...` — returns effective permissions for current user.
+
+---
+
+# 8. CDN & Cache
+
+1. `POST /v1/cdn/purge` `{ "urls":[...], "paths":[...], "asset_ids":[...] }`
+
+   * Purpose: purge CDN cache for assets or renditions.
+
+2. `GET /v1/cdn/status` — show last purge / cache hit rates (if integrated).
+
+---
+
+# 9. Webhooks & Eventing
+
+1. `GET /v1/webhooks`
+2. `POST /v1/webhooks` `{ "url":"https://...", "events":["asset.created","asset.updated","job.completed","asset.deleted"], "secret":"..." }`
+3. `GET /v1/webhooks/{id}`
+4. `PATCH /v1/webhooks/{id}`
+5. `DELETE /v1/webhooks/{id}`
+6. `POST /v1/webhooks/test` `{ "webhook_id": "..." }` (triggers test event)
+
+Event examples: `asset.uploaded`, `asset.ingest.failed`, `rendition.created`, `job.completed`, `share.created`, `asset.deleted`.
+
+---
+
+# 10. Audit logs & Activity
+
+1. `GET /v1/audit/events` — query by actor, action, asset\_id, date range. (admin access)
+2. `GET /v1/audit/events/{id}`
+
+Records: `actor_id`, `action`, `asset_id`, `ip`, `timestamp`, `details`.
+
+---
+
+# 11. Import / Export / Connectors
+
+1. `POST /v1/imports`
+
+   * Purpose: start an import job from external source (S3/GCS/Dropbox/FTP/URL list/Contentful). Body: `{ "type":"s3|gcs|url_list|dropbox", "config":{...}, "collection_id":"..." }`
+   * Response: job id.
+
+2. `GET /v1/imports/{id}`
+
+3. `POST /v1/exports`
+
+   * Purpose: export assets metadata + optionally originals to S3/GCS/zip. Body: filters, destination config.
+
+4. `GET /v1/exports/{id}`
+
+5. Webhooks for import/export completion.
+
+---
+
+# 12. Bulk operations
+
+1. `POST /v1/assets/bulk/update` `{ "asset_ids": [...], "patch": {...} }`
+2. `POST /v1/assets/bulk/delete`
+3. `POST /v1/assets/bulk/move` `{ "asset_ids": [...], "collection_id": "..." }`
+4. `POST /v1/assets/bulk/tags` `{ "asset_ids": [...], "tags": [...] }`
+
+Return: batch job id for async processing and progress endpoint `GET /v1/bulk/{jobId}`.
+
+---
+
+# 13. Throttling / Quotas / Usage
+
+1. `GET /v1/usage` — usage summary (storage used per bucket/collection, number of assets, monthly bandwidth).
+2. `GET /v1/quotas` — configured quotas for account/org.
+3. `PATCH /v1/quotas` — admin adjust quotas (if allowed).
+
+---
+
+# 14. Retention / Lifecycle policies
+
+1. `GET /v1/lifecycle/policies`
+2. `POST /v1/lifecycle/policies` `{ "name","conditions":{ "older_than_days":365, "tag":"expired" }, "action":"archive|delete|move", "schedule":"cron or immediate" }`
+3. `PATCH /v1/lifecycle/policies/{id}`
+4. `DELETE /v1/lifecycle/policies/{id}`
+5. `POST /v1/lifecycle/preview` — preview affected assets for policy.
+
+---
+
+# 15. OCR / Auto-tagging / AI features
+
+1. `POST /v1/assets/{assetId}/ai/extract-text`
+2. `POST /v1/assets/{assetId}/ai/auto-tag`
+3. `POST /v1/assets/{assetId}/ai/describe`
+4. `GET /v1/ai/models` — available models/presets
+
+These are implemented as jobs (see Jobs endpoints) and attach results to asset metadata.
+
+---
+
+# 16. Admin / Settings / Presets
+
+1. `GET /v1/admin/settings`
+2. `PATCH /v1/admin/settings` — global defaults (default renditions, max upload size, retention defaults).
+3. `GET /v1/admin/storage/regions` — available storage backends.
+4. `POST /v1/admin/ingestion-pipelines` — configure ingest pipelines (OCR → auto-tag → transcode).
+
+---
+
+# 17. Health, capabilities, and metadata
+
+1. `GET /v1/health` — service health (db, storage, queue, transcoder)
+2. `GET /v1/capabilities` — features enabled for this tenant (transcoding, ai, max\_upload\_size, allowed\_mimes).
+
+---
+
+# 18. Misc utilities
+
+1. `GET /v1/mimetypes` — supported mime types and handling.
+2. `GET /v1/thumbnail/{assetId}?w=100&h=100&fit=cover` — quick stateless thumbnail (cacheable).
+3. `GET /v1/metadata/preview-schema` — generate preview UI schema for editing metadata (helps frontend).
+
+---
+
+# Example asset resource JSON (canonical fields)
+
+```json
+{
+  "id":"asset_1234",
+  "filename":"hero.jpg",
+  "mime_type":"image/jpeg",
+  "size":123456,
+  "status":"ready",
+  "owner_id":"user_1",
+  "collection_id":"col_9",
+  "visibility":"private",
+  "metadata": { "title":"Spring hero", "photographer":"Alex" },
+  "tags":["hero","spring"],
+  "renditions":[
+    { "id":"r_1","type":"thumbnail","width":200,"height":150,"url":"https://cdn..." }
+  ],
+  "versions":[ ... ],
+  "created_at":"2025-08-01T12:00:00Z",
+  "updated_at":"2025-08-02T12:00:00Z"
+}
+```
+
+---
+
+# Design considerations / best practices (short)
+
+* **Separation of concerns**: keep heavy processing (transcoding, OCR) asynchronous (jobs + webhooks) to keep CRUD fast.
+* **Presigned URLs + direct-to-storage**: minimize server bandwidth—always support presigned S3/GCS uploads/downloads.
+* **Resumable uploads**: use tus or chunked uploads for large files.
+* **Renditions/caching**: store commonly-used renditions persistently, support on-the-fly transforms for ad-hoc requests.
+* **Metadata schemas**: validate metadata server-side and provide schema endpoints to the UI.
+* **ACL/Share model**: both object-level ACLs and short-lived signed links.
+* **Search**: maintain an index (Elasticsearch/Opensearch) synchronized via events for faceted search.
+* **Auditing & retention**: immutable audit log and lifecycle policies for compliance.
+* **Rate limiting**: implement throttles and surface limits in response headers.
+
+---
+
+If you want, I can:
+
+* produce an OpenAPI (Swagger) spec skeleton for these endpoints,
+* design exact request/response JSON schemas for a subset (e.g., upload flow + jobs),
+* or design how the presigned upload and resumable upload flows work end-to-end.
+
+Which next step would you like?

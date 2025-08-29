@@ -1,0 +1,299 @@
+# Attributes & Schema Service — REST API endpoints
+
+Great — here’s a focused, production-ready REST surface for the **Attributes & Schema Service**. This service owns attribute *definitions*, attribute *values* (enum/controlled vocabularies), typed *schemas* (product types, content types, resource schemas), validation rules, UI form templates, and the wiring that lets other services (Product, SKU, CMS, Catalog) use typed attributes. It **does not** hold product/variant data or pricing/inventory — it only manages the attribute/scheme models and validation.
+
+Base path assumed: `/api/v1` and most endpoints are store-scoped: `/api/v1/stores/{storeId}/...`. Common auth scopes shown (e.g. `attr:read`, `attr:write`, `schema:admin`). All list endpoints support pagination (`page`/`per_page` or cursor), `sort`, and common filters.
+
+---
+
+## Overview: resource map
+
+* `attribute-definitions` — typed attribute definitions (key, type, validation).
+* `attribute-values` — enum value management for attributes that are enumerations.
+* `schemas` — named schemas / templates (product-type, content-type, custom resource schemas) composed of attributes.
+* `field-groups` / `field-sets` — logical grouping / UI layout for forms.
+* `mappings` — which schemas are attached to which resource types (product, variant, SKU, collection, customer, order meta, etc.).
+* `validation` — dry-run / validate payloads against schemas.
+* `imports/exports` & `jobs` — large operations.
+* `audit-logs`, `usage`, `webhooks`, `search` — admin tooling.
+
+---
+
+## Attribute Definitions (core)
+
+Define attributes (key, label, data type, constraints, localization, visibility, where they can be used).
+
+* `POST /stores/{storeId}/attribute-definitions`
+  Create attribute definition. Body (high level):
+  `{ key, display_name: {en:"Color"}, description, type: "string|number|boolean|enum|date|json|richtext", localizable: bool, searchable: bool, filterable: bool, unique: bool, required: bool, default, validation: {min,max,regex,precision}, ui: {widget:"text|select|radio|colorpicker|image|multiselect",order}, metadata }`
+  Auth: `attr:write` or `schema:admin`
+  Response: `201` with attribute object.
+
+* `GET /stores/{storeId}/attribute-definitions`
+  List attribute definitions. Query: `q`, `type`, `filterable`, `searchable`, `used_by=<schema|resource>`, `page`, `per_page`.
+  Auth: `attr:read`
+
+* `GET /stores/{storeId}/attribute-definitions/{attrKey}`
+  Get full definition, constraints, example values, linked value-set id (if enum).
+  Auth: `attr:read`
+
+* `PATCH /stores/{storeId}/attribute-definitions/{attrKey}`
+  Partial update (display names, validation, ui hints). Must support `If-Match`/ETag to protect consumers. Changing type or `unique` should validate downstream dependencies.
+  Auth: `attr:write` (and `schema:admin` for breaking changes)
+
+* `PUT /stores/{storeId}/attribute-definitions/{attrKey}`
+  Replace attribute definition (rare, breaking). Use with caution.
+  Auth: `schema:admin`
+
+* `DELETE /stores/{storeId}/attribute-definitions/{attrKey}`
+  Soft-delete (or deprecate) attribute; `?force=true` to hard-delete after validation of usage. Return list of affected schemas/resources if deletion blocked.
+  Auth: `schema:admin`
+
+* `POST /stores/{storeId}/attribute-definitions/{attrKey}/deprecate`
+  Mark as deprecated, with `deprecated_message` and `effective_date`.
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/attribute-definitions/{attrKey}/usage`
+  Show where this attribute is used (schemas, number of resources that have values for it, last used timestamp). Auth: `attr:read`.
+
+---
+
+## Attribute Values (enum / controlled vocabularies)
+
+For `type=enum` attributes — manage a value-set with labels, sort order, codes, translations, mappings to external channels.
+
+* `POST /stores/{storeId}/attribute-values`
+  Create a value set (or attach values). Body: `{ attribute_key, values: [{code:"RED",label:{en:"Red",fr:"Rouge"},metadata,active:true,position:1,external_mappings:[{marketplace:"amazon_us",value:"Red-A"}]}] }`
+  Auth: `attr:write`
+
+* `GET /stores/{storeId}/attribute-values?attribute_key=color&page=...`
+  List values for a given attribute. Query supports `active`, `q`, `limit`.
+  Auth: `attr:read`
+
+* `GET /stores/{storeId}/attribute-values/{valueId}`
+  Value detail (translations, external mappings).
+  Auth: `attr:read`
+
+* `PATCH /stores/{storeId}/attribute-values/{valueId}`
+  Update label, active flag, position, mappings.
+  Auth: `attr:write`
+
+* `DELETE /stores/{storeId}/attribute-values/{valueId}`
+  Soft-delete a value (or mark inactive). If value in use, return usage sample unless `force=true`.
+  Auth: `attr:write`
+
+* `POST /stores/{storeId}/attribute-values/bulk`
+  Bulk add/update values (CSV/JSON). Returns `job_id`.
+  Auth: `attr:admin`
+
+* `GET /stores/{storeId}/attribute-values/export?attribute_key=color`
+  Export value set (CSV/JSON). Returns `export_job_id` or signed link.
+
+---
+
+## Schemas / Resource Types
+
+Schemas are named templates that define which attributes a resource type (e.g., `product`, `variant`, `collection`, or a custom type like `warranty`) must/should have, plus cardinality and groups.
+
+* `POST /stores/{storeId}/schemas`
+  Create a schema. Body: `{ id, name, resource_type: "product|variant|sku|collection|customer|orderMeta|custom", fields: [{ attribute_key, required:boolean, multiple:boolean, default, validation_overrides, ui:{group:"General",order:1}}], description, publish_mode: "strict|lenient", metadata }`
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/schemas`
+  List schemas. Query: `resource_type`, `q`, `page`.
+  Auth: `attr:read`
+
+* `GET /stores/{storeId}/schemas/{schemaId}`
+  Get full schema model (fields, versions, lifecycle). Optionally `?include=field_groups,example_payload`.
+  Auth: `attr:read`
+
+* `PATCH /stores/{storeId}/schemas/{schemaId}`
+  Modify schema (add/remove fields, change required flags). Breaking changes must create a new schema version. Support ETag.
+  Auth: `schema:admin`
+
+* `POST /stores/{storeId}/schemas/{schemaId}/versions`
+  Create new schema version (copy + change) — returns new `version_id`.
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/schemas/{schemaId}/versions`
+  List versions and diffs.
+  Auth: `attr:read`
+
+* `POST /stores/{storeId}/schemas/{schemaId}/activate`
+  Activate a schema version for a resource type (optionally scoped per channel). Body: `{version_id, resource_scope:{channels:[],regions:[]}}`.
+  Auth: `schema:admin`
+
+* `DELETE /stores/{storeId}/schemas/{schemaId}`
+  Delete or archive schema; block if in use unless `force=true`.
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/schemas/preview/{schemaId}?locale=en-GB`
+  Return generated admin form JSON (field order, labels, UI widgets) for UI rendering.
+  Auth: `attr:read`
+
+---
+
+## Field Groups / UI Form Layout
+
+Group fields into tabs/sections for admin UI and control visibility per role or channel.
+
+* `POST /stores/{storeId}/field-groups`
+  Create group: `{id,name,handle,order,visibility:{roles:[],channels:[]},metadata}`.
+  Auth: `attr:write`
+
+* `GET /stores/{storeId}/field-groups`
+  List groups.
+
+* `PATCH /stores/{storeId}/field-groups/{id}`
+  Update order/visibility.
+
+* `DELETE /stores/{storeId}/field-groups/{id}`
+  Delete group (reassign fields if needed).
+
+---
+
+## Schema Mappings (attach schemas to resources)
+
+Map which schema(s) apply to which resource types or specific resources.
+
+* `POST /stores/{storeId}/schema-mappings`
+  Create mapping: `{resource_type:"product", resource_type_key:"product_type:apparel", schema_id, scope:{channels:[],marketplaces:[]}, priority}`
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/schema-mappings`
+  List mappings (filter by resource\_type, schema\_id, channel).
+  Auth: `attr:read`
+
+* `DELETE /stores/{storeId}/schema-mappings/{mappingId}`
+  Remove mapping.
+
+---
+
+## Validation & Dry-run
+
+Validate arbitrary payloads or partial updates against one or more schemas (helpful for admin UI and ingest pipelines).
+
+* `POST /stores/{storeId}/schemas/validate`
+  Validate payload. Body: `{schema_id, payload, locale?, strict:boolean=false}`. Returns `{valid:boolean, errors:[{path,code,message}], warnings:[...]}`.
+  Auth: `attr:read` or `attr:write` for advanced validation.
+
+* `POST /stores/{storeId}/schemas/validate-batch`
+  Validate bulk payloads; returns `job_id` with results.
+  Auth: `attr:read`
+
+* `GET /stores/{storeId}/schemas/validate/{jobId}`
+  Get job results.
+
+* `POST /stores/{storeId}/schemas/dry-run-apply`
+  Simulate applying a schema change to N example resources and return a compatibility report (useful before breaking changes). Body: `{schema_change, sample_resource_ids[], limit}`. Returns report.
+  Auth: `schema:admin`
+
+---
+
+## Import / Export / Bulk Jobs
+
+Bulk creation and migration of attributes, values, schemas.
+
+* `POST /stores/{storeId}/attributes/import`
+  Import attribute-definitions or value-sets (CSV/JSON/ZIP). Body: file or `source_url`, options: `mode=upsert|create_only|replace`, `validate_only`. Returns `import_job_id`.
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/attributes/import/{jobId}`
+  Check import job status & error CSV.
+
+* `POST /stores/{storeId}/attributes/export`
+  Export definitions/value-sets/schemas. Body: `{type: "definitions|values|schemas", filters}`. Returns `export_job_id` or signed link.
+  Auth: `attr:read` or `schema:admin`
+
+* `POST /stores/{storeId}/attributes/bulk`
+  Bulk upsert endpoint for attribute-definitions or values (JSON list). Returns `bulk_job_id`.
+  Auth: `schema:admin`
+
+* `GET /api/v1/stores/{storeId}/jobs/{jobId}`
+  Generic job status endpoint used for imports/exports/indexing/validation. Response: `{job_id,status,progress,errors,results_url}`.
+  Auth: `attr:read`
+
+---
+
+## Search & Discovery
+
+Search attribute definitions/value-sets and fields to help admin UI.
+
+* `GET /stores/{storeId}/attributes/search?q=...&types=enum,string&page=...`
+  Free-text search across keys, labels, descriptions. Returns facets (type, used\_by).
+  Auth: `attr:read`
+
+* `GET /stores/{storeId}/attributes/autocomplete?q=colo`
+  Autocomplete for attr keys/labels for UI.
+  Auth: `attr:read`
+
+---
+
+## Audit Logs & History
+
+Record every change to attribute definitions, value-sets, and schemas.
+
+* `GET /stores/{storeId}/attributes/{attrKey}/audit-logs`
+  List audit events (actor, before/after, timestamp). Query: `since`, `actor_id`.
+  Auth: `schema:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/schemas/{schemaId}/versions/{versionId}/diff`
+  Show diff between versions.
+  Auth: `attr:read`
+
+---
+
+## Webhooks & Events
+
+Emit events so other services can revalidate, reindex, or respond to attribute/schema changes.
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook. Events relevant: `attribute.created`, `attribute.updated`, `attribute.deleted`, `value.created`, `value.updated`, `schema.created`, `schema.updated`, `schema.version.activated`, `schema.mappings.changed`. Body: `{url,events,secret,active,filters}`.
+  Auth: `schema:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Inspect delivery attempts.
+  Auth: `schema:admin`
+
+---
+
+## Helpers & Admin Utilities
+
+* `GET /stores/{storeId}/attributes/sample-payload?schema_id=...` — return example JSON payload for the schema to assist UIs.
+* `GET /stores/{storeId}/attributes/resolve?keys=brand,color,size` — return attribute metadata in bulk (useful for form rendering).
+* `GET /stores/{storeId}/attributes/compatibility-report?schema_id=...` — analyze risk of removing/changing an attribute.
+* `GET /stores/{storeId}/attributes/usage-stats` — counts of defined attributes, attributes used in N+ resources, top attributes by usage. Auth: `attr:read` or `billing:read`.
+* `GET /stores/{storeId}/attributes/validator/rules` — list available validation rule types and example constraints for UI builders.
+
+---
+
+## Validation & Governance policies
+
+* Enforce `key` naming conventions and uniqueness per store.
+* Support typed constraints (regex, min/max, decimal precision).
+* ETag / `If-Match` on updates to prevent race conditions.
+* Breaking changes (type changes, required->required) must create new schema versions and optionally trigger compatibility reports.
+* Soft-deprecation workflow: `deprecate` + warning window before hard-delete.
+* Audit trail mandatory for all changes.
+* Role & scope mapping (read/write/admin) with fine-grained ability to restrict which roles can edit critical attributes/schemas.
+
+---
+
+## Cross-cutting considerations (short)
+
+1. **Single source of truth:** this service provides canonical attribute definitions and schemas used across Product, SKU, CMS, etc. Other services should reference attributes by `key` and `storeId`.
+2. **Performance:** attribute lookups will be high-frequency in admin UIs — provide a fast `resolve` endpoint and CDN-cacheable exported JSON for storefronts.
+3. **Localization:** allow labels/translations on attributes & values. Support locale fallback.
+4. **Versioning:** schemas must be versioned and allow safe migrations. Provide tooling to preview & dry-run changes.
+5. **Extensibility:** allow arbitrary `metadata` per attribute to support custom UI widgets.
+6. **Safety:** prevent accidental destructive changes — require `force=true` and show a compatibility report before breaking operations.
+
+---
+
+If you want, I can now:
+
+* produce OpenAPI snippets for the highest-value endpoints (`attribute-definitions`, `attribute-values`, `schemas`, `validate`), or
+* draft JSON Schema examples for `attributeDefinition`, `attributeValue`, and `schema` resources, or
+* design the `job` status schema and error model used by imports/exports/validations.
+
+Pick one and I’ll generate it immediately.

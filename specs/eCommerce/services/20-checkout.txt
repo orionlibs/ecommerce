@@ -1,0 +1,420 @@
+# Checkout Service — REST API surface
+
+Great — below is a comprehensive, focused RESTful API design for a **Checkout Service**. This service orchestrates the final customer purchase flow: session orchestration, validation (pricing/taxes/shipping/promotions/fraud), payment authorization flows (including 3DS/SCA and APMs), inventory reservation handoff, order handoff, receipts, retries, and webhooks. It **does not** own products, carts, orders, payments gateway internals, inventory, pricing or promotions data — it calls those services. I include only endpoints relevant to checkout orchestration and runtime concerns.
+
+Common conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/checkout`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Frontend/public flows support short-lived publishable keys and guest tokens. Tenant via `X-Tenant-ID`.
+* Content-Type: `application/json`. File uploads (e.g., KYC docs) use `multipart/form-data` or presigned URLs.
+* Idempotency: all mutating endpoints accept `Idempotency-Key`.
+* Concurrency: use optimistic `version` or ETag + `If-Match` for updates where needed.
+* Pagination: `page`/`limit` or `cursor`.
+* Typical responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `500 Internal Server Error`.
+* Short names used: `cart_id`, `checkout_id`, `payment_intent_id`, `order_id` (created by Order Service after successful checkout).
+
+---
+
+## 1. Checkout session lifecycle
+
+Create and manage checkout sessions which tie together a cart, customer, shipping, payment, and finalization.
+
+* `POST /v1/checkout/sessions`
+  Create a checkout session (binds cart or snapshot). Body example:
+
+  ```json
+  {
+    "cart_id":"cart_123",
+    "owner": { "type":"user|guest", "id":"user_1" },
+    "currency":"GBP",
+    "channel":"web",
+    "metadata": { "source":"campaign_x" },
+    "options": { "capture_mode":"auto|manual", "require_billing_address":true }
+  }
+  ```
+
+  Response: `201` with session object `{ checkout_id, cart_snapshot, status: created, expires_at, client_token }`.
+
+* `GET /v1/checkout/sessions/{checkoutId}`
+  Retrieve session and canonical state (customer, addresses, selected shipping, applied promotions, payment intent status, validation issues).
+
+* `PATCH /v1/checkout/sessions/{checkoutId}`
+  Partial update (customer info, metadata, TTL extend) — uses `If-Match`/`version` to prevent races.
+
+* `DELETE /v1/checkout/sessions/{checkoutId}`
+  Cancel/abort session; optionally release any temporary reservations. Query `release_inventory=true`.
+
+* `POST /v1/checkout/sessions/{checkoutId}/refresh`
+  Force re-validate (pricing/tax/shipping/promos/fraud) and update session result. Response includes `calculation_id`, `validation_results`.
+
+---
+
+## 2. Customer & addresses during checkout
+
+Set or update shipping/billing addresses and contact info for the session.
+
+* `POST /v1/checkout/sessions/{checkoutId}/customer`
+  Set/replace customer info (email, phone, customer\_id for logged-in). Accept `save_for_later:true` flag to request storing payment preferences elsewhere.
+
+* `POST /v1/checkout/sessions/{checkoutId}/shipping-address`
+  Set shipping address; triggers shipping options refresh.
+
+* `POST /v1/checkout/sessions/{checkoutId}/billing-address`
+  Set billing address.
+
+* `GET /v1/checkout/sessions/{checkoutId}/addresses`
+  Retrieve addresses (shipping + billing, address validation status).
+
+* `POST /v1/checkout/sessions/{checkoutId}/contact`
+  Update contact phone/email for notifications and SMS OTP flows.
+
+---
+
+## 3. Shipping options & selection
+
+Request available shipping options and choose one.
+
+* `GET /v1/checkout/sessions/{checkoutId}/shipping-options`
+  Returns shipping options from Shipping Service; supports `include_estimated_delivery_dates=true`.
+
+* `POST /v1/checkout/sessions/{checkoutId}/select-shipping`
+  Select a shipping option: `{ "shipping_option_id":"ship_1", "carrier":"DHL", "service_code":"express" }` → triggers recalculation.
+
+* `POST /v1/checkout/sessions/{checkoutId}/pickup-location`
+  Choose store pickup location (if applicable).
+
+---
+
+## 4. Totals / authoritative calculation / validate
+
+Run authoritative recompute (pricing, promotions, taxes, shipping) and return final breakdown for checkout.
+
+* `POST /v1/checkout/sessions/{checkoutId}/calculate`
+  Core compute orchestration. Body options: `{ "force": true, "timeout_ms": 5000 }`
+  Response includes: per-line base price, adjustments (promos), tax lines, shipping, fees, totals, and `calculation_id` and `calculated_at`. Calculation must be atomic snapshot for the session.
+
+* `GET /v1/checkout/sessions/{checkoutId}/totals`
+  Return last computed totals (cached) and `calculation_id`.
+
+* `POST /v1/checkout/sessions/{checkoutId}/validate`
+  Run a validation-only pass that returns list of blockers (inventory shortfall, tax mismatch, promotion invalidation, payment\_method not supported) without mutating state.
+
+---
+
+## 5. Inventory reservation (handoff)
+
+Checkout orchestrates reservation requests to Inventory Service — reservation owned there. Provide reservation intent & status.
+
+* `POST /v1/checkout/sessions/{checkoutId}/reserve`
+  Request reservation for items in this session. Body: `{ "expires_in_seconds":900, "allocation_strategy":"best_fit|fifo|explicit_lots" }` → returns `reservation_id` and per-line reserved qty. May return partial reservations; checkout must surface to user.
+
+* `GET /v1/checkout/reservations/{reservationId}`
+  Get reservation status and expiry.
+
+* `POST /v1/checkout/reservations/{reservationId}/extend`
+  Extend TTL for ephemeral holds.
+
+* `POST /v1/checkout/reservations/{reservationId}/release`
+  Release reservation (used on cancel or timeout).
+
+Notes: inventory actual state is owned by Inventory Service — checkout only orchestrates and stores `reservation_id` and outcome.
+
+---
+
+## 6. Payment orchestration (payment intents, methods, APMs, 3DS, capture modes)
+
+Checkout coordinates payment attempts and completes authorization/capture flows. Payment execution usually proxied to Payment Service/Gateway.
+
+* `POST /v1/checkout/sessions/{checkoutId}/payment-intents`
+  Create / initialize payment intent (multi-method support). Body:
+
+  ```json
+  {
+    "amount": 10000,
+    "currency":"GBP",
+    "capture_mode":"auto|manual",
+    "payment_methods":["card","paypal","apple_pay","bank_transfer","buy_now_pay_later"],
+    "metadata":{}
+  }
+  ```
+
+  Returns `payment_intent_id`, `status` (`requires_payment_method`,`requires_action`,`requires_confirmation`,`succeeded`,`requires_capture`), and instructions (client\_secret, next\_action: redirect/url/3ds\_challenge).
+
+* `GET /v1/checkout/payment-intents/{paymentIntentId}`
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/attach-method`
+  Attach a payment method (token, saved method id) to intent. Body: `{ "payment_method_id":"pm_123", "save_method":true }`.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/confirm`
+  Confirm payment intent: for card flows that require SCA, this may return `requires_action` with `next_action` payload.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/3ds/complete`
+  Endpoint to receive the 3DS result (or client returns via callback) and proceed.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/capture`
+  Capture an authorized payment (used with `capture_mode=manual`). This should call Payment Service and upon success proceed with order finalization.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/cancel`
+  Cancel a pending intent and release any reservations.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/refund`
+  (Optional) Trigger refund via Payment/Refund Service (checkout may expose but payments service usually owns refunds). Should be idempotent.
+
+* `POST /v1/checkout/payment-intents/{paymentIntentId}/split`
+  Support split payment across multiple methods (APM + card, gift card combos). Body describes allocations.
+
+* `GET /v1/checkout/payment-methods`
+  List supported payment methods for the session context (country/channel/currency).
+
+* `POST /v1/checkout/payment-methods/tokenize`
+  Server-side tokenization request to Payment Service / Vault. Returns tokenized `payment_method_id` to be stored by Payment Service (not the Checkout Service).
+
+Notes: payment hub/gateway does heavy lifting. Checkout must handle webhooks from Payment Service (see webhooks section) and progress session state.
+
+---
+
+## 7. 3DS / Redirect / SCA flows & callback handlers
+
+Support redirect and callback endpoints for external flows.
+
+* `GET /v1/checkout/redirect/return`
+  Return URL for 3rd-party redirects (e.g., PayPal, APMs). Receives `checkout_id`, `payment_token`, `status` query params. Processes post-redirect verification and updates session & payment intent.
+
+* `POST /v1/checkout/3ds/callback`
+  Endpoint Payment Service calls with 3DS auth result (HMAC-signed). Processes and advances payment intent.
+
+* `GET /v1/checkout/sessions/{checkoutId}/next-action`
+  Retrieve client-side instructions for next step (redirect url, QR code payload, 3DS challenge details).
+
+---
+
+## 8. Finalization & order handoff
+
+When payment is successful (or offline payment confirmed), checkout finalizes and either creates an `order` via Order Service or returns a `checkout_complete` event.
+
+* `POST /v1/checkout/sessions/{checkoutId}/finalize`
+  Finalize checkout: validate, ensure payment captured (or offline payment confirmed), capture inventory reservation, create order (or call Order Service), generate receipts/invoices via Billing Service. Body options: `{ "create_order": true, "order_service_hint": { ... } }`
+  Response: `{ "status":"completed", "order_id":"order_123", "receipt_id":"rcpt_456" }` or failure reasons for manual resolution.
+
+* `POST /v1/checkout/sessions/{checkoutId}/finalize/async`
+  Async finalization for heavy post-processing (returns job id).
+
+* `GET /v1/checkout/finalizations/{jobId}`
+  Poll finalization job status and errors.
+
+* `POST /v1/checkout/sessions/{checkoutId}/finalize/rollback`
+  Attempt to rollback partial finalization (void payment, release reservation) — best-effort; should generate audit record and alert SRE if rollback fails.
+
+Design note: Order creation is typically done by Order Service — checkout should POST a stable payload to Order Service and wait for ack/async job.
+
+---
+
+## 9. Webhooks & event handling
+
+Receive and emit events: payment gateway webhooks, fraud provider webhooks, checkout lifecycle events.
+
+* `GET /v1/checkout/webhooks`
+
+* `POST /v1/checkout/webhooks` `{ "url":"https://...","events":["checkout.created","payment.succeeded","checkout.completed","checkout.failed"], "secret":"..." }` → create webhook subscription.
+
+* `DELETE /v1/checkout/webhooks/{id}`
+
+* `POST /v1/checkout/webhooks/test`
+
+* `POST /v1/checkout/webhook/payment`
+  Endpoint to accept payment gateway events (signed). Processes and maps to `payment_intent_id` and session.
+
+* `POST /v1/checkout/webhook/fraud`
+  Accept fraud provider decision events; may mark session for manual review or cancel.
+
+Event payloads should include `checkout_id`, `payment_intent_id`, correlation ids and `before/after` snapshots.
+
+---
+
+## 10. Fraud, KYC & risk checks
+
+Integration points to run fraud scoring, 3rd-party KYC flows and manual reviews.
+
+* `POST /v1/checkout/sessions/{checkoutId}/fraud/score`
+  Submit session payload to Fraud Service; returns risk score and recommended action (allow/challenge/cancel).
+
+* `GET /v1/checkout/fraud/rules`
+  List configured fraud rules used to auto-block or escalate.
+
+* `POST /v1/checkout/sessions/{checkoutId}/kyc/start`
+  Start KYC flow (request document upload, store KYC request id).
+
+* `POST /v1/checkout/kyc/{kycId}/complete`
+  Mark KYC complete (KYC provider callback handled via webhook).
+
+* `POST /v1/checkout/sessions/{checkoutId}/manual-review/assign`
+  Assign session to auditor/agent for manual review.
+
+---
+
+## 11. Gift cards, store credit & wallets
+
+Support gift card application and store-credit flows as part of payment mix.
+
+* `POST /v1/checkout/sessions/{checkoutId}/apply-giftcard` `{ "code":"GIFT123" }` → returns balance applied and remaining.
+
+* `POST /v1/checkout/sessions/{checkoutId}/remove-giftcard/{code}`
+
+* `POST /v1/checkout/sessions/{checkoutId}/apply-store-credit` `{ "amount":1000 }` → applies available credit.
+
+* `GET /v1/checkout/sessions/{checkoutId}/wallet` — list wallet instruments applied/available.
+
+---
+
+## 12. Hosted checkout & embeddable flows
+
+Support hosted pages and embeddable checkout sessions (SDK-friendly).
+
+* `POST /v1/checkout/sessions/{checkoutId}/hosted-url`
+  Create a secure hosted checkout page URL for a session (returns URL + TTL).
+
+* `GET /v1/checkout/sessions/{checkoutId}/embed-token`
+  Return a short-lived token for iframe/embed SDK.
+
+* `GET /v1/checkout/hosted/{hostedId}/status`
+  Retrieve hosted session status (useful for redirect return).
+
+---
+
+## 13. Multi-shipment & split-fulfillment
+
+Support split shipments (items shipped from different locations, partial shipments).
+
+* `POST /v1/checkout/sessions/{checkoutId}/split-shipment-plan`
+  Request suggested split shipments (calls fulfillment/inventory). Returns shipment groups, estimates and per-shipment totals.
+
+* `POST /v1/checkout/sessions/{checkoutId}/select-shipment-plan`
+  Select a plan before finalization.
+
+---
+
+## 14. Time-limited holds & SLOs
+
+Support holds on limited inventory, limited-time checkout offers & reservation TTLs.
+
+* `GET /v1/checkout/sessions/{checkoutId}/holds`
+  List active holds (promo buckets, inventory holds).
+
+* `POST /v1/checkout/sessions/{checkoutId}/holds/extend` — request extension.
+
+---
+
+## 15. Errors, disputes & remediation
+
+Endpoints to surface failed checkouts and provide remediation actions.
+
+* `GET /v1/checkout/failures` — list failed checkouts with reasons (payment\_declined, inventory, fraud, validation).
+
+* `POST /v1/checkout/sessions/{checkoutId}/resolve` — action to resolve a failed session (e.g., replace payment method, manual override, apply discount).
+
+* `POST /v1/checkout/sessions/{checkoutId}/support-note` — attach notes for support teams.
+
+---
+
+## 16. Analytics, metrics & exports
+
+Operational and business metrics specific to checkout flows.
+
+* `GET /v1/checkout/metrics`
+  Checkout KPIs: `checkout_initiated`, `payment_attempts`, `3ds_challenges`, `abandon_rate`, `conversion_rate`, `avg_time_to_purchase`, with date-range query.
+
+* `POST /v1/checkout/exports`
+  Export checkout events/failed sessions to S3/BI (async job).
+
+* `GET /v1/checkout/sessions/{checkoutId}/timeline` — timeline of events (calculate calls, payment attempts, reservation events).
+
+---
+
+## 17. Admin / configuration / fraud thresholds / feature flags
+
+Tenant-level configuration and operational tools.
+
+* `GET /v1/checkout/settings` — show tenant checkout settings (default capture mode, max payment attempts, hold TTLs, allowed APMs per country, hosted checkout config).
+
+* `PATCH /v1/checkout/settings` — update.
+
+* `GET /v1/checkout/capabilities` — features enabled for tenant (3ds, hosted\_pages, split\_payments, installments).
+
+* `GET /v1/checkout/tx-limits` / `PATCH` — per-tenant transaction limits, velocity rules.
+
+* `GET /v1/checkout/audit` — audit of checkout state changes (admin only).
+
+---
+
+## 18. Health & diagnostics
+
+SRE tooling to inspect checkout pipeline health.
+
+* `GET /v1/checkout/health` — subsystems: payment gateway connectivity, inventory worker, calculation queue, webhook delivery, hosted pages service.
+
+* `GET /v1/checkout/diagnostics` — inflight sessions count, average reservation latency, average payment intent latency, queue depth.
+
+* `GET /v1/checkout/threads` — long-running finalization jobs (admin).
+
+---
+
+## Example Checkout Session resource (canonical)
+
+```json
+{
+  "checkout_id":"chk_0001",
+  "cart_id":"cart_123",
+  "owner":{"type":"user","id":"user_1"},
+  "status":"created",            // created | collecting | reserved | payment_processing | completed | failed | canceled
+  "client_token":"pub_abc123",   // short-lived token for client SDK
+  "calculation_id":"calc_20250829_3",
+  "totals": {
+    "currency":"GBP",
+    "sub_total":4995,
+    "discount_total":500,
+    "tax_total":300,
+    "shipping_total":399,
+    "grand_total":5194
+  },
+  "shipping_address": { /*...*/ },
+  "billing_address": { /*...*/ },
+  "selected_shipping": { "id":"ship_1","label":"Next day","cost":399 },
+  "reservation_id":"resv_111",
+  "payment_intent": {
+    "id":"pi_abc",
+    "status":"requires_confirmation",
+    "amount":5194,
+    "currency":"GBP",
+    "next_action": { "type":"redirect","url":"https://pay.gateway/..." }
+  },
+  "created_at":"2025-08-29T12:00:00Z",
+  "updated_at":"2025-08-29T12:01:30Z",
+  "version":4,
+  "metadata":{}
+}
+```
+
+---
+
+## Design notes & best practices (short)
+
+* **Orchestration, not ownership:** Checkout orchestrates pricing, taxes, shipping, promotions, inventory reservations, and payments — keep logic thin and delegate to specialized services. Persist stable snapshots so you can reproduce calculations in audits.
+* **Idempotency & eventual consistency:** All mutating operations that can be retried must accept `Idempotency-Key`. Long-running flows (reservation → payment → finalization) are eventually consistent and need audit trails and compensating actions (release/reserve/void).
+* **Atomic critical paths:** Make payment authorization + reservation finalization atomic where possible (or design clear rollback/compensation workflows). Prefer two-phase flows: reserve → authorize → capture/finalize.
+* **Low-latency read path:** Serve cached totals for UI but always allow a `fresh=true` authoritative compute step before finalizing payment. Return `calculation_id` and timestamp to detect stale totals.
+* **Security / PCI:** Never persist raw card data — use Payment Service / Vault for tokenization. Ensure hosted/redirect endpoints validate provider signatures. Use short-lived client tokens for browser flows.
+* **SCA / 3DS support:** Provide explicit next-action flows and callback handlers. Support redirect-less challenge flows if gateway supports.
+* **Observability & SLOs:** Monitor reservation success rates, payment failure modes, 3DS friction and checkout abandonment by step for product improvement.
+* **Recovery & manual ops:** Provide admin tooling to list failed sessions and retry or manually finalize with appropriate audit and controls.
+* **UX focus:** Provide clear error codes and `explain` payloads (e.g., `inventory_shortfall`, `payment_declined:insufficient_funds`, `fraud_block`) so frontend can guide users.
+* **Compliance & audits:** Persist full event timeline for each checkout (calculations, payment intents, reservation events) for dispute resolution and accounting.
+
+---
+
+If you’d like next, I can:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`POST /sessions`, `/calculate`, `/reserve`, `/payment-intents`, `/finalize`),
+* produce detailed **JSON schemas** for `checkout session`, `payment_intent`, and `finalize` request/response shapes (with idempotency examples),
+* or design the **end-to-end finalization state machine** (sequence diagrams + compensation logic) with pseudocode for race handling.
+
+Which output would you like now?

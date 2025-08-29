@@ -1,0 +1,401 @@
+# Payouts & Transfers Service — REST API surface
+
+Nice — here’s a comprehensive, focused RESTful API design for a **Payouts & Transfers Service**.
+This service is responsible for moving funds *out* of the platform to external destinations and for internal transfer bookkeeping: merchant/partner payouts, marketplace split transfers, refunds/negative-adjustments to payouts, scheduled/queued batch payouts, settlement file ingestion, FX/convert-on-payout, reconciliation and reporting, connectors to banks/acquirers, KYC/AML checks for payout accounts, webhooks and admin controls.
+
+This surface contains **only** endpoints relevant to payouts/transfers and their supporting concerns (no card auths, no order/cart logic, no pricing). Where necessary it references other services by id (e.g. `payment_intent_id`, `settlement_id`, `merchant_account_id`).
+
+---
+
+## Conventions (applies to all endpoints)
+
+* Base path: `https://api.example.com/v1/payouts` (or tenant-prefixed `/v1/{tenantId}/payouts`)
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID`. Admin endpoints require elevated RBAC.
+* Content-Type: `application/json`. Bulk imports accept NDJSON or S3 pointer. File exchanges (settlement files, bank files) use presigned URLs.
+* Money: minor units + currency (ISO-4217) everywhere, e.g. `{ "amount": 100000, "currency":"GBP" }`.
+* Idempotency: mutating endpoints accept `Idempotency-Key`.
+* Pagination: cursor + `limit`.
+* Time format: RFC3339 / ISO8601.
+* Responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`.
+
+---
+
+# 1 — Merchant / Payout account management
+
+Manage merchant/recipient accounts (bank accounts, payout methods, verification/KYC).
+
+* `GET /v1/payouts/recipients`
+  List all recipients (merchants, vendors, partners). Filters: `status`, `country`, `currency`.
+
+* `POST /v1/payouts/recipients`
+  Create recipient entity. Body: `{ "type":"merchant|vendor|partner","name","legal_name","tax_id","country","default_currency","metadata" }` → `201` with `recipient_id`.
+
+* `GET /v1/payouts/recipients/{recipientId}` / `PATCH /v1/payouts/recipients/{recipientId}` / `DELETE /v1/payouts/recipients/{recipientId}`
+  Soft delete/disable only (retain audit).
+
+* `POST /v1/payouts/recipients/{recipientId}/bank-accounts`
+  Add bank account / destination. Body: `{ "country","currency","account_type":"bank_account|iban|ach|eps|bacs|fpx", "account_details":{...}, "nickname":"Main", "metadata":{} }` → `201` with `bank_account_id`.
+
+* `GET /v1/payouts/recipients/{recipientId}/bank-accounts` / `GET /v1/payouts/bank-accounts/{bankAccountId}` / `PATCH` / `DELETE`
+
+* `POST /v1/payouts/bank-accounts/{bankAccountId}/verify`
+  Start verification (micro-deposit, API verification). Returns verification `challenge_id`.
+
+* `POST /v1/payouts/bank-accounts/{bankAccountId}/verify/complete`
+  Complete verification (submit amounts or token).
+
+* `GET /v1/payouts/recipients/{recipientId}/kyc`
+  Get KYC status.
+
+* `POST /v1/payouts/recipients/{recipientId}/kyc/submit`
+  Submit KYC documents / metadata (presigned upload URLs used for files).
+
+* `GET /v1/payouts/recipients/{recipientId}/compliance`
+  AML / sanction checks summary and history.
+
+---
+
+# 2 — Payout instructions & single payout operations
+
+Create and manage individual payouts.
+
+* `POST /v1/payouts`
+  Create a single payout instruction. Body example:
+
+  ```json
+  {
+    "recipient_id":"rcp_123",
+    "bank_account_id":"ba_456",
+    "amount": 125000,
+    "currency":"GBP",
+    "source":"settlement|reserve|manual",
+    "reference":"settle_batch_2025_08_29/rcp_123",
+    "scheduled_for":"2025-09-01T09:00:00Z",   // optional - immediate if omitted
+    "fx":"convert_to_destination|none",       // optional FX strategy
+    "metadata": { "order_ids":[ "ord_1","ord_2" ] }
+  }
+  ```
+
+  Response: `201` payout object with `payout_id`, status `queued|scheduled|processing|paid|failed|cancelled`.
+
+* `GET /v1/payouts/{payoutId}` — get payout status & history.
+
+* `PATCH /v1/payouts/{payoutId}` — edit (only allowed while `queued`/`scheduled`), e.g. change scheduled time or metadata.
+
+* `POST /v1/payouts/{payoutId}/cancel` — cancel pending payout (if not submitted to bank).
+
+* `POST /v1/payouts/{payoutId}/retry` — retry failed payout (admin or automated).
+
+* `GET /v1/payouts` — list payouts; filter by `recipient_id`, `status`, `source`, `scheduled_for` date range, `batch_id`.
+
+* `POST /v1/payouts/{payoutId}/simulate` — simulate FX, fees and net amount (dry-run).
+
+---
+
+# 3 — Bulk payouts & batch processing
+
+Batch creation, scheduling and processing for payroll/settlements.
+
+* `POST /v1/payouts/batch`
+  Create a batch of payouts (array or S3 pointer). Body options: `{ "name","payouts":[{...}], "scheduled_for":"...","execution_window":"UTC-09:00/09:00-17:00" }` → returns `batch_id` and job status.
+
+* `GET /v1/payouts/batch/{batchId}` — batch status and per-payout results.
+
+* `POST /v1/payouts/batch/{batchId}/submit` — submit batch to connector (manual submit).
+
+* `POST /v1/payouts/batch/{batchId}/cancel` — cancel remaining queued payouts in batch.
+
+* `GET /v1/payouts/batch/{batchId}/file` — download generated bank file (e.g., NACHA/SEPA/BACS) as presigned URL.
+
+* `POST /v1/payouts/batch/{batchId}/approve` — approval workflow (for payouts that require finance sign-off).
+
+* `POST /v1/payouts/batch/{batchId}/simulate` — dry-run of fees and FX for whole batch.
+
+---
+
+# 4 — Marketplace splits & internal transfers (platform bookkeeping)
+
+Transfers between internal ledgers: split sale proceeds, reserved fees, platform commission, cross-merchant transfers.
+
+* `POST /v1/payouts/transfers`
+  Internal ledger transfer. Body:
+
+  ```json
+  {
+    "from_ledger":"platform_escrow",
+    "to_ledger":"merchant_ledger_rcp_123",
+    "amount":100000,
+    "currency":"GBP",
+    "reference":"sale_split_ord_123",
+    "metadata": {}
+  }
+  ```
+
+  Response: transfer record with `transfer_id`, status `posted|pending|failed`.
+
+* `GET /v1/payouts/transfers/{transferId}` / `GET /v1/payouts/transfers` — list/filter.
+
+* `POST /v1/payouts/split`
+  High-level: take a settled `settlement_id` or `payment_intent_id` and create multiple transfers & payout instructions according to distribution rules. Body: `{ "source":"settlement_abc", "allocations":[{recipient_id,amount},{...}], "fee_model":"flat|percent|mixed" }`.
+
+* `POST /v1/payouts/transfers/settle` — finalize transfers (post to GL via accounting export).
+
+Design note: transfers are bookkeeping-first; only when transferred to bank do funds move externally.
+
+---
+
+# 5 — Settlement ingestion & reconciliation
+
+Import acquirer settlement files and reconcile.
+
+* `POST /v1/payouts/settlements/ingest`
+  Ingest settlement file (SFTP/S3 file pointer or file upload). Body: `{ "connector_id","file_url","file_type":"acquirer_csv|nacha|sepa", "settlement_date":"2025-08-29" }` → `202` with `job_id`.
+
+* `GET /v1/payouts/settlements/{jobId}` — parsing status & records count.
+
+* `GET /v1/payouts/settlements/{settlementId}` — settlement batch record with included transaction references.
+
+* `POST /v1/payouts/settlements/{settlementId}/reconcile` — run reconciliation (match payouts/charges to settled amounts) → job id.
+
+* `GET /v1/payouts/reconciliation/{jobId}` — reconciliation report: matched/unmatched & suggested actions.
+
+---
+
+# 6 — FX / currency conversions on payout
+
+Handle currency conversion choices & quote APIs.
+
+* `POST /v1/payouts/fx/quote`
+  Quote for converting `amount` from platform currency to destination currency: `{ "from_currency":"USD","to_currency":"EUR","amount":100000, "quote_ttl_seconds":300 }` → returns `fx_quote_id`, `rate`, `fee`, `net_amount`, `expires_at`.
+
+* `GET /v1/payouts/fx/quotes/{fxQuoteId}`
+
+* `POST /v1/payouts/fx/execute`
+  Execute FX and attach to payout (or instruct connector to convert on-route).
+
+Design note: support providers multi-quote and choose best rate, or fixed rate per merchant contract.
+
+---
+
+# 7 — Connectors to banks / acquirers / payroll providers
+
+Register and manage connectors that actually move funds.
+
+* `GET /v1/payouts/connectors`
+  List connectors (bank rails, local rails, PSP payout APIs).
+
+* `POST /v1/payouts/connectors`
+  Register connector: `{ "name","type":"bank|psp|payroll","config":{...},"priority" }`.
+
+* `GET /v1/payouts/connectors/{connectorId}` / `PATCH` / `DELETE`.
+
+* `POST /v1/payouts/connectors/{connectorId}/test` — connectivity & credential test.
+
+* `GET /v1/payouts/connectors/{connectorId}/status` — last-run, last-file sent, error rates.
+
+* `POST /v1/payouts/connectors/{connectorId}/send-file` — push bank file to connector (returns tracking id).
+
+---
+
+# 8 — Holds, reserves, recalls & reversals
+
+Temporarily hold funds, recall payouts and process reversals.
+
+* `POST /v1/payouts/{payoutId}/hold`
+  Place hold on payout (reason: dispute, compliance). Creates hold record and sets status `on_hold`.
+
+* `POST /v1/payouts/{payoutId}/release` — release hold with note.
+
+* `POST /v1/payouts/{payoutId}/recall`
+  Attempt recall of payout already sent to bank (best-effort, connector-dependent). Returns recall status `requested|succeeded|failed`.
+
+* `POST /v1/payouts/{payoutId}/reverse`
+  Create reversal instruction (create internal transfer back to platform ledger or request bank reversal).
+
+---
+
+# 9 — Refunds related to payouts
+
+When refunds or chargebacks require reducing/adjusting payouts.
+
+* `POST /v1/payouts/adjustments`
+  Create payout adjustment (debit or credit) referencing `payment_intent_id` or `charge_id` and `payout_id`. Body: `{ "payout_id","amount","type":"refund|chargeback_adjustment","reason","metadata" }` → updates payout ledger & may generate recovery transfer.
+
+* `GET /v1/payouts/adjustments/{adjustmentId}` / list.
+
+* `POST /v1/payouts/adjustments/{adjustmentId}/settle` — settle adjustment (post to recipient ledger).
+
+---
+
+# 10 — Reporting, exports & statements
+
+Generate recipient statements, export data for accounting.
+
+* `GET /v1/payouts/statements/{recipientId}?from=...&to=...`
+  Generate or fetch statement (PDF/CSV) showing payout history, fees, reversals, pending.
+
+* `POST /v1/payouts/exports`
+  Export payouts, settlements or reconciliation reports to S3 (async job). Body: `{ "query":{...},"format":"csv|parquet","destination":"s3://..."} ` → `job_id`.
+
+* `GET /v1/payouts/exports/{jobId}` — status & download.
+
+* `GET /v1/payouts/metrics` — KPIs: payout volume, success\_rate, failure\_reasons, avg\_settlement\_time, recall\_rate.
+
+---
+
+# 11 — Webhooks & subscriptions
+
+Notify downstream systems about payout lifecycle events.
+
+* `GET /v1/payouts/webhooks` / `POST /v1/payouts/webhooks` `{ "url","events":["payout.created","payout.paid","payout.failed","batch.completed","reconciliation.completed"], "secret" }` → `201`.
+
+* `DELETE /v1/payouts/webhooks/{id}` / `POST /v1/payouts/webhooks/test`.
+
+* Event payloads must include `payout_id`, `batch_id` (if any), `status`, `attempts`, `reason`, `timestamps` and `correlation_id`.
+
+---
+
+# 12 — Jobs, async operations & audit
+
+Background jobs for heavy operations and complete audit trails.
+
+* `GET /v1/payouts/jobs` — list recent jobs (ingest, backfill, reconciliation, batch processing).
+
+* `GET /v1/payouts/jobs/{jobId}` — status, progress, error details.
+
+* `POST /v1/payouts/jobs/{jobId}/cancel` — cancel running job.
+
+* `GET /v1/payouts/audit` — query audit: who created/approved/cancelled payouts (filter by actor, action, date range).
+
+---
+
+# 13 — Approvals & workflow
+
+Approval flows for high-risk or large payouts.
+
+* `POST /v1/payouts/approvals`
+  Create approval request for payout or batch: `{ "target":"payout|batch","target_id","requested_by","amount","reason","required_approvers":[role_ids], "expires_at" }` → returns `approval_id`.
+
+* `GET /v1/payouts/approvals/{approvalId}` / `POST /v1/payouts/approvals/{approvalId}/approve` / `/reject`.
+
+* `GET /v1/payouts/approvals` — pending approvals for current user.
+
+---
+
+# 14 — Sandbox & testing utilities
+
+Sandbox connectors and simulate bank responses.
+
+* `POST /v1/payouts/test/simulate`
+  Simulate connector callbacks (paid/failed/returned) for a `payout_id` in sandbox only.
+
+* `GET /v1/payouts/test/methods` — list test bank account numbers and behaviors.
+
+(Disabled in production.)
+
+---
+
+# 15 — Security, keys, roles & RBAC
+
+APIs to manage access & credentials.
+
+* `GET /v1/payouts/keys` / `POST /v1/payouts/keys` — create API keys (scoped e.g., `payout:read`, `payout:write`, `settlement:ingest`) — returns plaintext once.
+
+* `GET /v1/payouts/roles` / `POST /v1/payouts/roles` — create/manage roles: `payouts_admin`, `payouts_approver`, `reconciler`, `ops`.
+
+* `GET /v1/payouts/permissions/me` — effective permissions for caller.
+
+---
+
+# 16 — Health, diagnostics & metrics
+
+Operational endpoints for SRE.
+
+* `GET /v1/payouts/health` — subsystems: connectors, queue workers, FX provider, job worker, storage.
+
+* `GET /v1/payouts/diagnostics` — inflight batches, queue depth, last settlement ingest timestamp, connector error rates, hot recipient cardinality.
+
+* `GET /v1/payouts/metrics/internal` — internal metrics (payout\_latency\_p50/p95, failure\_rate).
+
+---
+
+# 17 — Example resource shapes
+
+Payout (abridged)
+
+```json
+{
+  "id":"pout_0001",
+  "recipient_id":"rcp_123",
+  "bank_account_id":"ba_456",
+  "batch_id":"batch_20250901_01",   // optional
+  "amount":125000,
+  "currency":"GBP",
+  "fee":2500,
+  "net_amount":122500,
+  "status":"queued", // queued|scheduled|processing|paid|failed|cancelled|on_hold|reversed
+  "reference":"settle_2025_08_31_rcp123",
+  "scheduled_for":"2025-09-01T09:00:00Z",
+  "attempts":0,
+  "last_error":null,
+  "created_at":"2025-08-31T12:00:00Z",
+  "updated_at":"2025-08-31T12:01:00Z",
+  "metadata":{}
+}
+```
+
+Batch (abridged)
+
+```json
+{
+  "id":"batch_20250901_01",
+  "name":"September 1 Settlements",
+  "submitted_by":"svc_settlements",
+  "payout_count":100,
+  "total_amount":12500000,
+  "status":"pending_approval", // pending_approval|processing|completed|partial_failed|cancelled
+  "file_url":"s3://.../batch_20250901_01.csv",
+  "created_at":"2025-09-01T06:00:00Z"
+}
+```
+
+FX Quote
+
+```json
+{
+  "id":"fx_qq_01",
+  "from_currency":"USD",
+  "to_currency":"EUR",
+  "rate":0.912345,
+  "fee": 50, // minor units in destination currency or explicit fee object
+  "expires_at":"2025-09-01T09:05:00Z"
+}
+```
+
+---
+
+# 18 — Design considerations & best practices (brief)
+
+* **Clear separation:** payouts service should be the canonical engine for *moving funds out* and for payout ledger state; do not duplicate payment auth or order logic. Accept references to `payment_intent_id`, `settlement_id`, etc.
+* **Idempotency & retryable semantics:** every create/submit/cancel must be idempotent (client-provided idempotency key). Bank connectors will retry; dedupe at service.
+* **Approval & segregation of duties:** support approval workflows for high-value batches; require RBAC and audit `reason` for destructive ops.
+* **Batch-first flows:** generate bank files (NACHA/SEPA/BACS) and push them to connectors; keep human-friendly per-batch reports and maker/checker workflows.
+* **Connector isolation & fallbacks:** support multiple connectors per rail and routing policies; have retries and fallback rules per-country/currency.
+* **FX & fee transparency:** quote then execute. Always show gross/fee/net for recipient and include fee model configuration per merchant. Support pass-through fees or platform-subsidized fees.
+* **Reconciliation-focused:** store gateway/acquirer references and settlement file ingestion. Provide recon reports to identify mismatches and automate resolution suggestions.
+* **Holds & recalls:** support holds for disputes/AML; implement best-effort recall when funds already sent and record outcome.
+* **Security & compliance:** store bank credentials & connector secrets encrypted; PII handling for bank account info must meet local/regional compliance; KYC docs stored via presigned URLs and access logs.
+* **Auditability & provenance:** every movement of funds must be auditable (who initiated, approved, attempted, result). Keep immutable records and provide export for accounting.
+* **Observability & SLAs:** monitor payout success rates, settlement lag, reconciliation mismatch ratio and recall success rates; expose dashboards and alerting.
+* **Testing & sandbox:** provide test rails and simulated connector responses. Ensure sandbox endpoints are gated from production.
+* **Legal & tax:** allow metadata to carry tax/treatments and point to billing/journal entries for GL integration.
+
+---
+
+If you want, I can next:
+
+* generate an **OpenAPI skeleton** for the most-used endpoints (`/payouts`, `/batch`, `/transfers`, `/connectors`, `/settlements`),
+* produce **JSON schemas** for `payout` / `batch` / `transfer` resources and an NDJSON bulk upload example,
+* or design the **batch execution architecture** (file generation, connector workers, retries, approval workflow, and reconciliation loop) with sequence diagrams and pseudocode.
+
+Which would you like now?

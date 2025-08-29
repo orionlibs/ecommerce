@@ -1,0 +1,464 @@
+Nice — let’s design a **comprehensive REST API surface for the *Store Service*** (the thing that owns storefronts/merchant accounts, channels, domains, branding, pages, navigation, themes, locales and other store-level configuration). I’ll include only endpoints that belong to the store domain (no carts, stock, orders, payments, product CRUD, user-auth internals, etc.). I’ll also call out important query params, typical request/response pieces, auth scopes, and useful features (publish/versioning/webhooks).
+
+---
+
+# Store Service — REST API endpoints
+
+> Base path assumed: `/api/v1` (replaceable). All endpoints require authentication; mention of scopes below (e.g. `store:read`, `store:write`, `store:admin`) — your Auth/User service issues these and staff are referenced by user IDs.
+
+---
+
+## Stores (top-level merchant/storefront object)
+
+Manage the store entity itself (multi-tenant). A **store** is the container for everything: channels, domains, branding, settings, pages, menus, themes.
+
+* `POST /stores`
+  Create a new store.
+  Body highlights: `name`, `owner_user_id`, `timezone`, `default_locale`, `default_currency`, `trial_plan`, `region`, `metadata`
+  Auth: `store:admin` or `platform:admin`
+  Responses: `201 Created` with store resource.
+
+* `GET /stores`
+  List stores (filter/paginate).
+  Query: `q`, `status` (active/disabled), `owner_user_id`, `region`, `page`, `per_page`, `sort`
+  Auth: `store:read` (scoped to accessible stores) or `platform:admin`
+  Responses: `200` list + paging.
+
+* `GET /stores/{storeId}`
+  Get store details (full configuration summary).
+  Auth: `store:read`
+  Response includes links/ids for child resources (channels, domains, themes).
+
+* `PATCH /stores/{storeId}`
+  Partial update (name, timezone, default\_locale, metadata, enabled/disabled).
+  Auth: `store:admin`
+
+* `PUT /stores/{storeId}`
+  Replace store config (rare).
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}`
+  Soft-delete or schedule deletion. Query `hard=true` to permanently delete (careful).
+  Auth: `platform:admin` or store owner.
+
+* `POST /stores/{storeId}/restore`
+  Restore a soft-deleted store.
+  Auth: `platform:admin` or store owner.
+
+* `GET /stores/{storeId}/availability`
+  Health/availability check for a store (status of key services like CDN, domain, theme publish). Useful for dashboards.
+  Auth: `store:read`
+
+---
+
+## Store Settings (fine-grained config)
+
+Store-level configuration that affects storefront behavior (not payments or product-specific settings).
+
+* `GET /stores/{storeId}/settings`
+  Return all settings grouped (localization, currency display, measurement units, region settings, legal page references).
+  Auth: `store:read`
+
+* `PATCH /stores/{storeId}/settings`
+  Update one or more setting groups. Body may include `localization`, `currency_format`, `measurement_unit`, `maintenance_mode`, `analytics` (IDs), `seo_defaults`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/settings/{settingKey}`
+  Get single setting group (e.g., `localization`).
+  Auth: `store:read`
+
+---
+
+## Channels (sales channels / storefront channels)
+
+Channels represent where the store is exposed: `web`, `mobile`, `pos`, `api`, marketplace feeds, etc.
+
+* `POST /stores/{storeId}/channels`
+  Create channel. Body: `type` (web/mobile/pos), `handle`, `display_name`, `locale`, `currency`, `published` (bool), `metadata`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/channels`
+  List channels for store. Query `type`, `published`.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/channels/{channelId}`
+  Get channel detail (CNAMEs, domain mapping, active theme id for this channel).
+  Auth: `store:read`
+
+* `PATCH /stores/{storeId}/channels/{channelId}`
+  Update channel (toggle published, change locale/currency mapping, change assigned theme).
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/channels/{channelId}`
+  Remove channel.
+  Auth: `store:admin`
+
+* `POST /stores/{storeId}/channels/{channelId}/publish`
+  Publish channel (deploy channel-specific theme/pages). Triggers theme/page publish pipeline. Response returns `publish_job_id`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/channels/{channelId}/publish-status`
+  Poll status of last publish job. Query `job_id` optional.
+  Auth: `store:read`
+
+---
+
+## Domains & DNS (store domains, SSL, redirects)
+
+Attach custom domains / manage SSL and redirects.
+
+* `POST /stores/{storeId}/domains`
+  Add domain. Body: `hostname`, `channel_ids` (channels this domain serves), `force_https` (bool), `default` (bool). Returns verification instructions (CNAME/A records).
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/domains`
+  List domains (status: `pending`, `verified`, `error`), SSL expiry, assigned channels.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/domains/{domainId}`
+  Domain detail (DNS verification steps, certificate status, last validation time).
+
+* `PATCH /stores/{storeId}/domains/{domainId}`
+  Update domain config: `force_https`, `redirect_to` (an ID or URL), `channel_ids`.
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/domains/{domainId}`
+  Remove domain and revoke cert if issued.
+  Auth: `store:admin`
+
+* `POST /stores/{storeId}/domains/{domainId}/verify`
+  Trigger domain verification (re-check DNS or issue SSL).
+  Auth: `store:admin`
+
+---
+
+## Branding & Assets (logos, favicons, static assets used by themes)
+
+Store-level asset management.
+
+* `POST /stores/{storeId}/assets`
+  Upload asset (multipart). Body: `file`, `key` (path), `tags`, `expires_at` (optional). Returns asset URL & id.
+  Auth: `store:admin` or `store:assets:write`
+
+* `GET /stores/{storeId}/assets`
+  List assets. Query: `key`, `tag`, `prefix`, `page`.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/assets/{assetId}`
+  Asset metadata. Optionally `?download=true` to get signed download link.
+  Auth: `store:read` (signed links may be public where appropriate)
+
+* `PATCH /stores/{storeId}/assets/{assetId}`
+  Update metadata (alt text, tags, cache control).
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/assets/{assetId}`
+  Delete asset.
+  Auth: `store:admin`
+
+---
+
+## Themes & Templates (visual templates, theme versions, compilation)
+
+Theme management: upload theme packages, preview, versioning, theme variables.
+
+* `POST /stores/{storeId}/themes`
+  Create / upload a theme bundle (zip or git reference). Body: `name`, `version`, `source` (upload or repo url), `metadata`. Response: `theme_id` and `build_job_id`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/themes`
+  List available themes (built, draft, active). Query `status`, `tag`.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/themes/{themeId}`
+  Get theme details and default variables.
+
+* `PATCH /stores/{storeId}/themes/{themeId}`
+  Update theme metadata, variables (colors, fonts), or `published` flag.
+  Auth: `store:admin`
+
+* `POST /stores/{storeId}/themes/{themeId}/build`
+  Trigger build / asset compilation (returns `build_job_id`). Useful if theme source was updated.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/themes/{themeId}/build-status`
+  Poll build status (logs, errors). `?job_id=` optionally.
+  Auth: `store:read`
+
+* `POST /stores/{storeId}/themes/{themeId}/activate`
+  Activate theme for a channel(s). Body: `channel_ids`, `activate_immediately` (bool). Activation may create a version entry.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/themes/{themeId}/preview?token=...`
+  Create preview URL (signed) for designers to view a theme without activating. Returns a preview link.
+  Auth: `store:read` (or `store:admin` to create token)
+
+* `GET /stores/{storeId}/themes/{themeId}/versions`
+  List theme versions (for rollback).
+
+* `POST /stores/{storeId}/themes/{themeId}/rollback`
+  Rollback to previous version. Body: `version_id`.
+  Auth: `store:admin`
+
+---
+
+## CMS Pages / Content (store-owned pages — policies, landing pages)
+
+If CMS is part of store service; otherwise this can be a thin wrapper linking to CMS. Endpoints below assume basic page management is part of store service.
+
+* `POST /stores/{storeId}/pages`
+  Create page. Body: `title`, `slug`, `body` (HTML/structured blocks), `template` (optional), `channel_visibility` (channels), `published` (bool), `seo` (title/meta/og), `metadata`.
+  Auth: `store:admin` or `cms:editor`
+
+* `GET /stores/{storeId}/pages`
+  List pages. Query `published`, `channel`, `q`, `page`, `per_page`.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/pages/{pageId}`
+  Get page content & publish metadata.
+
+* `PATCH /stores/{storeId}/pages/{pageId}`
+  Update page content or publish status. Supports drafts.
+  Auth: `cms:editor` or `store:admin`
+
+* `DELETE /stores/{storeId}/pages/{pageId}`
+  Delete page (soft-delete).
+  Auth: `store:admin`
+
+* `POST /stores/{storeId}/pages/{pageId}/publish`
+  Publish page to live (per channel). Returns `publish_job_id`.
+  Auth: `cms:editor` or `store:admin`
+
+* `GET /stores/{storeId}/pages/{pageId}/versions`
+  Version history for page (diffs, author, timestamp).
+  Auth: `store:read`
+
+---
+
+## Navigation / Menus
+
+Store navigation (header/footer menus) that reference other resources by ID (e.g., categories, pages, external links).
+
+* `POST /stores/{storeId}/menus`
+  Create menu. Body: `name`, `handle`, `structure` (tree of menu items with type: `page`, `category_ref`, `url`, `product_ref` but only store contains menu structure — product refs are IDs). `channel_visibility`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/menus`
+  List menus. Query: `channel`, `handle`.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/menus/{menuId}`
+  Get full menu tree.
+
+* `PATCH /stores/{storeId}/menus/{menuId}`
+  Update menu tree, reorder items, add/remove items.
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/menus/{menuId}`
+  Delete menu.
+  Auth: `store:admin`
+
+---
+
+## Legal & Policy Pages (terms, privacy, returns)
+
+Store-managed legal documents and versioning.
+
+* `POST /stores/{storeId}/policies`
+  Create policy doc (`type`: terms/privacy/returns/shipping-terms). Body: `title`, `content`, `effective_from`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/policies`
+  List active and past policies.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/policies/{policyId}`
+  Get policy content and versions.
+
+* `PATCH /stores/{storeId}/policies/{policyId}`
+  Update policy (creates new version, keeps history).
+  Auth: `store:admin`
+
+---
+
+## Localization & Currencies (store-level locales, languages, currency formatting)
+
+Mapping of supported languages, default locale, per-channel locales.
+
+* `GET /stores/{storeId}/locales`
+  List configured locales and fallbacks.
+  Auth: `store:read`
+
+* `POST /stores/{storeId}/locales`
+  Add locale. Body: `code` (e.g. en-GB), `display_name`, `direction` (ltr/rtl), `fallbacks`.
+  Auth: `store:admin`
+
+* `PATCH /stores/{storeId}/locales/{localeCode}`
+  Update locale settings.
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/locales/{localeCode}`
+  Remove locale (validate no dependent content).
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/currencies`
+  List enabled currencies for the store and formatting rules (symbol position, decimals).
+  Auth: `store:read`
+
+* `POST /stores/{storeId}/currencies`
+  Enable a currency. Body: `code`, `formatting`.
+  Auth: `store:admin`
+
+---
+
+## Store Staff & Roles (mapping to user IDs from User Service)
+
+Manage team members who can administer the store. The service does **not** store user credentials — it links to `user_id`.
+
+* `POST /stores/{storeId}/staff`
+  Add staff member. Body: `user_id`, `roles` (e.g., `admin`, `editor`, `support`), `scope` (channels or sections), `invite` (bool) to send invite email via Notification service.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/staff`
+  List staff members & roles. Query `role`.
+  Auth: `store:admin` or `store:read` for managers.
+
+* `GET /stores/{storeId}/staff/{userId}`
+  Get staff entry.
+  Auth: `store:admin` or `store:read`
+
+* `PATCH /stores/{storeId}/staff/{userId}`
+  Update roles/scopes.
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/staff/{userId}`
+  Remove staff from store.
+  Auth: `store:admin`
+
+* `POST /stores/{storeId}/staff/{userId}/sso-token`
+  Generate a temporary SSO/admin link for this user to log into store admin UI (signed, expires). Auth: `store:admin`
+
+---
+
+## Audit Logs (store-level activity)
+
+Immutable records of administrative actions for compliance and rollback.
+
+* `GET /stores/{storeId}/audit-logs`
+  List logs. Query: `actor_user_id`, `action_type`, `since`, `until`, `page`.
+  Auth: `store:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/audit-logs/{logId}`
+  Get log entry details (old/new values).
+  Auth: `store:admin` or `compliance:read`
+
+---
+
+## Publish / Deployment (store-wide publish operations)
+
+Publishing pages/themes/channels. This often triggers async jobs — API returns job IDs.
+
+* `POST /stores/{storeId}/publish`
+  Publish all pending items (pages, theme changes) or scoped by `?scope=channel|pages|theme`. Body optional: `channel_ids`, `items`. Returns `publish_job_id`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/publish/{publishJobId}`
+  Get publish job status & logs.
+  Auth: `store:read`
+
+* `GET /stores/{storeId}/publish/history`
+  List previous publishes (who, what, timestamp, status).
+  Auth: `store:read`
+
+---
+
+## Webhooks & Event Subscriptions
+
+Allow external services to react to store-level events (e.g., store.updated, theme.activated, domain.verified).
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook. Body: `url`, `events` (array), `secret`, `active`.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/webhooks`
+  List hooks.
+  Auth: `store:read`
+
+* `PATCH /stores/{storeId}/webhooks/{webhookId}`
+  Update hook.
+  Auth: `store:admin`
+
+* `DELETE /stores/{storeId}/webhooks/{webhookId}`
+  Remove hook.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/delivery-attempts`
+  Inspect delivery history & failures.
+  Auth: `store:admin`
+
+**Typical events emitted**: `store.created`, `store.updated`, `store.deleted`, `channel.published`, `domain.verified`, `theme.activated`, `page.published`, `page.updated`, `asset.uploaded`.
+
+---
+
+## Search & Discovery (store configuration search)
+
+Endpoints to search across pages, themes, assets, menus for admin UI.
+
+* `GET /stores/{storeId}/search`
+  Admin search across store-managed resources. Query: `q`, `types` (pages, assets, themes, menus), `limit`, `offset`.
+  Auth: `store:read`
+
+---
+
+## Bulk/Import Export
+
+Bulk operations for admins and migrations.
+
+* `POST /stores/{storeId}/import`
+  Import store config bundle (JSON/zip). Body: file or `source_url`. Options: `overwrite` (bool), `import_assets` (bool). Returns `import_job_id`.
+  Auth: `platform:admin` or `store:admin`
+
+* `GET /stores/{storeId}/import/{jobId}`
+  Import job status & errors.
+
+* `POST /stores/{storeId}/export`
+  Export store config (pages, menus, theme settings, policies). Query `include_assets=true`. Returns signed download link or `export_job_id`.
+  Auth: `store:admin`
+
+---
+
+## Diagnostics & Health
+
+Admin endpoints for diagnostics, feature flags, and usage.
+
+* `GET /stores/{storeId}/diagnostics`
+  Return diagnostics: publish queue length, last publish timestamps, certificate expiries, asset storage usage, storage quotas.
+  Auth: `store:admin`
+
+* `GET /stores/{storeId}/usage`
+  Usage and billing-related counters (pageviews if tracked here, asset bandwidth). Typically surfaces for billing service.
+  Auth: `store:read` or `billing:read`
+
+---
+
+## Helpful Cross-cutting features / considerations
+
+* **Pagination & filtering**: all list endpoints support `page`, `per_page`, `sort`, and common filters.
+* **E-tags / If-Match**: support optimistic concurrency on PATCH for themes/pages/settings.
+* **Roles & Scopes**: endpoints require specific scopes; store service only references `user_id` for staff (actual user data lives in User Service).
+* **Async operations**: publishes, theme builds, imports/exports return job ids — provide `/jobs/{jobId}` or the resource-specific status endpoints above.
+* **Versioning**: pages and themes keep version history with `created_by` and `notes`.
+* **Webhooks & Event Schema**: standardize event payloads and retry/delivery semantics.
+* **Rate limits**: administrative operations may have stricter limits, and public preview links should be rate-limited.
+* **Audit trail**: every change to settings/pages/themes must be logged to `audit-logs`.
+* **Public storefront vs admin API**: this list is admin-focused. Public storefront endpoints (rendered HTML or static assets) are served via CDN/edge — your Store Service will provide published JSON/HTML output and preview tokens, but not be used for high-volume public read traffic.
+
+---
+
+If you want, I can now:
+
+* produce OpenAPI (Swagger) snippets for the most important resources (Stores / Channels / Themes / Pages), or
+* design the async job model and job status schema (`jobId`, `status`, `progress`, `logs`), or
+* draft example JSON schemas for `store`, `channel`, `theme`, `page`, and `menu` resources.
+
+Which of those would you like me to generate next? (I’ll pick one and produce full specs immediately.)

@@ -1,0 +1,345 @@
+# Validation & Data Quality Service — REST API endpoints
+
+Nice — here’s a focused, production-ready REST surface for a **Validation & Data Quality Service**. This service is responsible for validating incoming/outgoing data, profiling datasets, detecting anomalies, suggesting/fixing data quality issues, running business rules, and providing metrics/alerts. It references domain resources by `resource_type` + `resource_id` (it does **not** own product/order data). Base path assumed: `/api/v1`. Most endpoints are store-scoped: `/api/v1/stores/{storeId}/...`. Suggested auth scopes: `dq:read`, `dq:write`, `dq:admin`, `dq:execute`. All list endpoints support pagination (`page`/`per_page` or cursor), sorting and common filters.
+
+---
+
+## Design principles / quick notes
+
+* Store-scoped by default — validations normally operate within a store/tenant.
+* Supports both **sync** (validate-on-write) and **async** (bulk/large datasets/jobs) operations.
+* All heavy operations return `job_id` and expose `/jobs/{jobId}` for status/results.
+* Validation results use a consistent error model: `{severity: "error|warning|info", code, message, path, suggestion, rule_id}`.
+* Support for auto-fix actions is gated by scopes and must produce audit records.
+* Integrates with Schema/Attributes, Product, SKU, PIM, and ETL/ingest pipelines (but stores only validation artifacts).
+
+---
+
+# Core endpoints
+
+## 1) Validation execution (sync & async)
+
+### Synchronous / on-write validations (use for APIs that need immediate feedback)
+
+* `POST /stores/{storeId}/validate`
+  Validate a single resource payload immediately. Body: `{resource_type, resource_id?, payload, validate_mode: "strict|lenient|dry_run", ruleset_id?}`
+  Response (sync): `{valid: true/false, issues:[{severity,code,message,path,suggestion,rule_id}], summary:{errors,warnings,infos}}`.
+  Auth: `dq:execute`
+
+* `POST /stores/{storeId}/{resource_type}/{resourceId}/validate`
+  Validate an existing resource by id (service will fetch live data and validate). Body optional: `{ruleset_id, validate_mode}`.
+  Auth: `dq:execute` or `dq:read`
+
+### Asynchronous / bulk validations
+
+* `POST /stores/{storeId}/validate/bulk`
+  Submit a bulk validation job. Body: `{source:{type:"file|stream|url|table",uri,format:"csv|json|parquet"}, resource_type, ruleset_id, sample_size?, notify_webhook?, auto_fix:false}`
+  Response: `202 Accepted` with `{job_id}`.
+  Auth: `dq:execute` or `dq:admin`
+
+* `GET /stores/{storeId}/validate/jobs/{jobId}`
+  Job status & results summary: `{job_id,status,progress,errors_count,warnings_count,result_url (signed download),started_at,completed_at}`.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/validate/jobs/{jobId}/results`
+  Stream / download full validation results (paginated) or sample of failures. Returns signed link or streaming JSON.
+  Auth: `dq:read`
+
+---
+
+## 2) Rule & Ruleset management
+
+Manage validation rules, reusable rulesets, priorities, and versions.
+
+* `POST /stores/{storeId}/rules`
+  Create validation rule. Body: `{key, description, expression|type:"jsonlogic|sql|custom", severity:"error|warning|info", error_code, suggestion_template, metadata, author}`.
+  Auth: `dq:write`
+
+* `GET /stores/{storeId}/rules`
+  List rules. Query: `q, severity, active, tag, type`.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/rules/{ruleId}`
+  Get rule details (compiled expression, example matches, last\_run\_stats).
+  Auth: `dq:read`
+
+* `PATCH /stores/{storeId}/rules/{ruleId}`
+  Update rule (create new rule version if breaking change). Support `If-Match`.
+  Auth: `dq:write`
+
+* `DELETE /stores/{storeId}/rules/{ruleId}`
+  Deprecate or remove rule (returns usage impact). `?force=true` to hard-delete.
+  Auth: `dq:admin`
+
+* `POST /stores/{storeId}/rulesets`
+  Create ruleset (ordered list of rules, scope, default actions `fail|warn|auto_fix`). Body: `{name,description,rule_ids[],scope:{resource_types[],channels[]},active}`.
+  Auth: `dq:write`
+
+* `GET /stores/{storeId}/rulesets` / `GET /stores/{storeId}/rulesets/{rulesetId}` / `PATCH` / `DELETE`
+  Manage rulesets (versions, activation, scope).
+  Auth: `dq:read` / `dq:write` / `dq:admin`
+
+* `POST /stores/{storeId}/rulesets/{rulesetId}/test`
+  Run a quick test of ruleset against a sample payload(s). Body: `{payloads:[...], debug:true}`. Returns detailed per-rule evaluation and explain plan.
+  Auth: `dq:execute`
+
+* `GET /stores/{storeId}/rulesets/{rulesetId}/usage`
+  Show where ruleset applied: endpoints, jobs, pipelines.
+  Auth: `dq:read`
+
+---
+
+## 3) Profiling, data quality reports & metrics
+
+Create dataset profiles and recurring data quality reports.
+
+* `POST /stores/{storeId}/profiles`
+  Create a profiling job for a data source. Body: `{source:{type,url,format}, sample_size, metrics:[completeness,uniqueness,distinct_count,cardinality,null_rate,pattern_distribution], schedule?:cron}`. Returns `profile_job_id`.
+  Auth: `dq:execute`
+
+* `GET /stores/{storeId}/profiles/{profileJobId}`
+  Profile job status & results (summary statistics, column-level metrics, histograms, top values).
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/profiles/{profileJobId}/columns/{columnName}/histogram`
+  Column-level distributions and top-N values.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/quality-reports`
+  List scheduled data quality reports. Query: `period,resource_type`.
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/quality-reports`
+  Create a scheduled report. Body: `{name,scope:{datasets,resource_types},metrics,recipients,format:csv|pdf|json,cron}`. Returns `report_id`.
+  Auth: `dq:admin`
+
+* `GET /stores/{storeId}/quality-reports/{reportId}/run`
+  Trigger immediate run; returns `job_id`.
+  Auth: `dq:execute`
+
+---
+
+## 4) Anomaly detection & drift
+
+Detect unusual changes and schema drift over time.
+
+* `POST /stores/{storeId}/anomalies/detect`
+  Run anomaly detection over dataset or field. Body: `{source,metric: "value_volume|null_rate|distribution_change",window:{from,to},sensitivity,baseline_period}`. Returns `job_id` and sample anomalies.
+  Auth: `dq:execute`
+
+* `GET /stores/{storeId}/anomalies/{anomalyJobId}`
+  Get anomalies details and confidence scores.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/schema-drift`
+  List recent schema drift events (fields added/removed/type-changes) for monitored sources. Filter by `since`.
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/schema-drift/subscribe`
+  Subscribe to drift alerts for a source; body: `{source,thresholds,channels:[email,webhook],recipients}`.
+  Auth: `dq:admin`
+
+---
+
+## 5) Deduplication, matching & normalization
+
+Detect duplicates, merge suggestions, canonicalization.
+
+* `POST /stores/{storeId}/dedupe`
+  Run deduplication job. Body: `{source,matching_strategy:"exact|fuzzy|ml",keys:["email","gtin","sku"],threshold,merge_strategy:"suggest|auto|mark_duplicate"}`. Returns `job_id`.
+  Auth: `dq:execute`
+
+* `GET /stores/{storeId}/dedupe/jobs/{jobId}`
+  Job status & sample matches.
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/dedupe/{jobId}/merge`
+  Execute merges for selected clusters. Body: `{actions:[{cluster_id,merge_to_id,fields_to_preserve}],dry_run:false}`. Returns `merge_job_id`. **Merge actions must produce audit logs in target services (integration required).**
+  Auth: `dq:admin`
+
+* `POST /stores/{storeId}/normalize`
+  Submit normalization rules (normalize phone, address, gtin), or run normalization on a data source. Body: `{source,normalizers:[{field,method:"phone_e164|address_standardize|gtin_normalize"}],auto_fix:false}`. Returns `job_id`.
+  Auth: `dq:execute`
+
+* `GET /stores/{storeId}/normalizers` / `POST /stores/{storeId}/normalizers` / `PATCH` / `DELETE`
+  Manage reusable normalizer definitions and mappings.
+  Auth: `dq:write` / `dq:admin`
+
+---
+
+## 6) Auto-fix, remediation & change proposals
+
+Generate fixes, propose changes, and optionally apply them automatically.
+
+* `POST /stores/{storeId}/fixes/propose`
+  Produce suggested fixes for a validation job or sample. Body: `{job_id|result_url,scope:rows|columns|all,fix_ruleset_id?,confidence_threshold}`. Returns `proposal_id` and sample fixes.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/fixes/{proposalId}`
+  Details of proposed fixes and suggested operations with diffs.
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/fixes/{proposalId}/apply`
+  Apply fixes. Body: `{apply_mode:"preview|apply",target:{type:"source|target_service_api"},notify,create_change_request:true}`. Returns `apply_job_id`. **Requires `dq:admin` and emits audit events; integrations required to actually write changes into source systems.**
+  Auth: `dq:admin`
+
+* `GET /stores/{storeId}/fixes/{proposalId}/apply/{applyJobId}`
+  Status and result (with audit links).
+  Auth: `dq:read`
+
+---
+
+## 7) Validators / plugins registry (custom code, ML models)
+
+Register and manage custom validators, ML models, or external validators.
+
+* `POST /stores/{storeId}/validators`
+  Register a validator. Body: `{key,kind:"script|container|ml_model|external",endpoint_url?,runtime,version,inputs_schema,outputs_schema,metadata}`.
+  Auth: `dq:admin`
+
+* `GET /stores/{storeId}/validators` / `GET /stores/{storeId}/validators/{validatorId}` / `PATCH` / `DELETE`
+  Manage validators.
+  Auth: `dq:read` / `dq:admin`
+
+* `POST /stores/{storeId}/validators/{validatorId}/test`
+  Run test inputs against validator and return debug trace. Body: `{payload,debug:true}`.
+  Auth: `dq:execute`
+
+---
+
+## 8) Integration endpoints (webhooks, pipeline hooks)
+
+Hook into ingest pipelines and notify other services.
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook for DQ events: `validation.completed`, `profile.completed`, `anomaly.detected`, `fix.applied`, `schema.drift`. Body: `{url,events[],secret,active,filters}`.
+  Auth: `dq:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Delivery logs & failure reasons.
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/hooks/pre-commit`
+  Endpoint for pipelines to call before committing data (synchronous). Returns `{allow:true|false,issues:[],blocking:true|false}`. Typical signature: `source_pipeline` will POST payload or record batch and expect immediate verdict.
+  Auth: signed pipeline token / `dq:execute`
+
+* `POST /stores/{storeId}/hooks/post-commit`
+  Pipeline calls this after data committed so the DQ service can run post-commit profiling/alerts (async). Body: `{source,resource_type,resource_ids[],notify_webhook?:true}`. Returns `{job_id}`.
+  Auth: pipeline token
+
+---
+
+## 9) Jobs, scheduling & monitoring
+
+Generic job endpoints for long-running validation/profile/repair tasks.
+
+* `GET /stores/{storeId}/jobs/{jobId}`
+  Generic job status: `{job_id,status:queued|running|failed|completed,progress,errors[],result_url,started_at,completed_at}`.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/jobs`
+  List recent jobs with filters (`type, status, created_by`).
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/schedules`
+  Create scheduled jobs (profiles, validations). Body: `{name,job_spec:{type,params},cron,enabled,notify}`. Returns `schedule_id`.
+  Auth: `dq:admin`
+
+* `GET /stores/{storeId}/schedules` / `PATCH` / `DELETE`
+  Manage schedules.
+  Auth: `dq:read` / `dq:admin`
+
+* `GET /stores/{storeId}/alerts`
+  List active alerts (anomalies, failing scheduled jobs, drift).
+  Auth: `dq:read`
+
+* `POST /stores/{storeId}/alerts/{alertId}/ack`
+  Acknowledge an alert.
+  Auth: `dq:read` or `dq:admin`
+
+---
+
+## 10) Audit logs, lineage & history
+
+Immutable logs for each change and provenance information.
+
+* `GET /stores/{storeId}/dq-audit-logs`
+  Search audit logs: filters `actor_id,action,resource_type,resource_id,since,until`. Paginated.
+  Auth: `dq:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/dq-lineage/{resource_type}/{resource_id}`
+  Data lineage for a resource: ingestion sources, transformations applied, last validations, and fixes.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/dq-changes/{changeId}`
+  Retrieve change record (who applied fix, diffs, before/after, target system write details).
+  Auth: `dq:read`
+
+---
+
+## 11) Exports, reports & dashboards
+
+Exports for BI and stakeholder reports.
+
+* `POST /stores/{storeId}/exports/validation-summary`
+  Export validation summaries for a window. Body: `{since,until,resource_types[],format:csv|json|pdf}`. Returns `export_job_id`.
+  Auth: `dq:read`
+
+* `GET /stores/{storeId}/dashboards/health`
+  Return quick KPI set: `current_error_rate`, `trend_7d`, `top_10_issues`, `coverage_percent`. Useful for admin UI.
+  Auth: `dq:read`
+
+---
+
+## 12) Helpers & admin utilities
+
+* `GET /stores/{storeId}/dq/schemas` — fetch supported schemas / resolve schema from Schema Service (cached). Auth: `dq:read`.
+* `POST /stores/{storeId}/dq/validate-preview` — quick preview of a rule change impact using a sample dataset. Auth: `dq:read`.
+* `GET /stores/{storeId}/dq/suggestions?issue_code=...` — list recommended normalizers or fixes for a given issue code. Auth: `dq:read`.
+* `GET /stores/{storeId}/dq/lookup?field=email&value=foo@bar.com` — return last validation results and mapped records. Auth: `dq:read`.
+* `GET /stores/{storeId}/dq/diagnostics` — health: queue length, failed validators, ML model latency, storage usage. Auth: `dq:admin`.
+
+---
+
+## Error model & result schema (recommended standard)
+
+A standard error/issue item returned across endpoints:
+
+```json
+{
+  "severity": "error | warning | info",
+  "code": "DQ_MISSING_REQUIRED_FIELD",
+  "message": "Field 'title' is missing",
+  "path": "product.title",
+  "row": 123,                // optional for tabular sources
+  "suggestion": "Set title from product.name or vendor feed",
+  "rule_id": "rule_abc123",
+  "timestamp": "2025-08-29T12:34:56Z",
+  "metadata": { "confidence": 0.92 }
+}
+```
+
+---
+
+## Cross-cutting considerations
+
+* **Idempotency & job ids**: all async endpoints should accept `Idempotency-Key` and return a `job_id`.
+* **Permissions**: restrict auto-fix/apply endpoints to `dq:admin` and require explicit `approval_request` when fixing production datasets. Integrate with Workflow & Approval Service for sensitive fixes.
+* **Explainability**: provide debug/explain mode for rules and ML validators so admins can see why a rule fired.
+* **Integration patterns**: support push (webhook) and pull (feed/URLs) data sources; provide pre-commit hooks for pipelines to block bad data.
+* **Observability**: emit events for `validation.completed`, `profile.completed`, `anomaly.detected`, and `fix.applied` so downstream services can react.
+* **Data residency & retention**: allow configuring retention for profiles, job results and audit trails to meet compliance.
+* **Performance**: for large datasets, use sampling + incremental validation + streaming results; provide partial result links while jobs run.
+* **Extensibility**: validator plugin registry for custom logic (sandboxing of custom code is mandatory).
+* **Inter-service contracts**: rely on Schema/Attributes Service for canonical attribute definitions and on Workflow Service for change approvals.
+* **UI-friendly**: ensure endpoints return compact counts & top-n samples for dashboards to avoid pulling full result sets in the UI.
+
+---
+
+Would you like me to:
+
+* generate OpenAPI snippets for the highest-value endpoints (`/validate`, `/validate/bulk`, `/rules`, `/rulesets`, `/profiles`, `/jobs`), or
+* produce JSON schemas for `validation result`, `job status`, and `ruleset` resources, or
+* design a sample rule DSL and examples (`jsonlogic` + metadata) for the service?
+
+Pick one and I’ll produce it immediately.

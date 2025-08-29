@@ -1,0 +1,744 @@
+## 1 — Product Catalog (Product Master)
+
+**Purpose:** canonical product records: SKUs, variants, attributes, bundles, relationships (upsell/cross-sell), lifecycle (draft → published → archived).
+**Key models:** Product, SKU, Variant, Attribute, Category, Tag, ProductRelationship, MediaPointer.
+**Storage & scale:** RDBMS for canonical data; document store or search index for denormalized views; CDN/object store for media. Cache (Redis) for hot product reads.
+**Events/topics:** `product.created`, `product.updated`, `product.published`, `product.archived`.
+**Representative endpoints:**
+
+* `GET /v1/products` (search/filter/paginate)
+* `POST /v1/products`
+* `GET /v1/products/{productId}`
+* `PATCH /v1/products/{productId}`
+* `POST /v1/products/{productId}/publish`
+* `GET /v1/products/{productId}/skus`
+* `POST /v1/products/{productId}/media`
+
+---
+
+## 2 — Product Information Management (PIM) / Attributes & Taxonomy
+
+**Purpose:** rich attribute modelling, localized product content, category taxonomy, MDM for product attributes, variant rules.
+**Key models:** AttributeDefinition, AttributeValue, TaxonomyNode, LocalizedContent, MappingProfile.
+**Storage & scale:** document DB for flexible attributes (Mongo/Cosmos) + schema registry for attribute rules.
+**Events/topics:** `attribute.created`, `taxonomy.updated`.
+**Representative endpoints:**
+
+* `POST /v1/attributes`
+* `GET /v1/attributes/{id}`
+* `POST /v1/taxonomy/nodes`
+* `GET /v1/products/{id}/attributes?locale=en-GB`
+* `POST /v1/mappings/import`
+
+---
+
+## 3 — Inventory Service (Availability & Fulfillment Slots)
+
+**Purpose:** on-hand inventory, reservations, stock allocations, safety stock, per-warehouse counts, backorder handling, lot/serial tracking.
+**Key models:** InventoryLocation, StockLevel, Reservation, StockMovement, Lot/Serial.
+**Storage & scale:** transactional RDBMS with strong consistency + event-sourced movement logs; partition by warehouse/region.
+**Events/topics:** `inventory.adjusted`, `stock.reserved`, `stock.released`.
+**Representative endpoints:**
+
+* `GET /v1/inventory?sku={sku}&location={loc}`
+* `POST /v1/inventory/{sku}/adjust` (delta)
+* `POST /v1/reservations` (reserve for order)
+* `POST /v1/reservations/{id}/release`
+* `GET /v1/warehouses/{id}/availability`
+
+---
+
+## 4 — Pricing & Promotions Service
+
+**Purpose:** price rules (list, sale, tiered pricing), promotions/coupons, dynamic pricing, per-customer/segment pricing, price schedules.
+**Key models:** PriceList, PriceTier, Promotion, Coupon, SeasonalRule, PriceOverride.
+**Storage & scale:** rules store (RDBMS) + in-memory pricing engine/cache for low-latency calculations; feature flags for experiments.
+**Events/topics:** `price.updated`, `promotion.applied`.
+**Representative endpoints:**
+
+* `GET /v1/prices?sku={sku}&customerId={id}`
+* `POST /v1/promotions`
+* `POST /v1/prices/{sku}/override`
+* `POST /v1/promotions/{id}/validate` (validate cart)
+* `GET /v1/price-lists/{id}`
+
+---
+
+## 5 — Shopping Cart & Session Service
+
+**Purpose:** persistent carts (multi-device), guest carts, cart merges, complex line items (kits, bundles), promotions applied, cart-quoting.
+**Key models:** Cart, CartLine, CouponApplied, CartSession, Quote.
+**Storage & scale:** fast key-value store for session/carts (Redis) with periodic durable persistence to DB for long-lived carts; TTLs for inactive carts.
+**Events/topics:** `cart.updated`, `cart.abandoned`, `quote.generated`.
+**Representative endpoints:**
+
+* `POST /v1/carts` (create)
+* `GET /v1/carts/{cartId}`
+* `POST /v1/carts/{cartId}/lines`
+* `POST /v1/carts/{cartId}/apply-coupon`
+* `POST /v1/carts/{cartId}/checkout-intent`
+
+---
+
+## 6 — Checkout & Order Management Service (OMS)
+
+**Purpose:** accept checkouts, generate orders, order lifecycle (new → processing → shipped → delivered → cancelled), multi-line shipments, order holds, partial fulfillment.
+**Key models:** Order, OrderLine, FulfillmentInstruction, OrderStatus, PaymentReference, ShippingGroup.
+**Storage & scale:** transactional RDBMS for authoritative order state + event store for immutable history; sagas for long-running workflows.
+**Events/topics:** `order.created`, `order.updated`, `order.fulfilled`, `order.cancelled`.
+**Representative endpoints:**
+
+* `POST /v1/orders` (from a cart / checkout)
+* `GET /v1/orders/{orderId}`
+* `PATCH /v1/orders/{orderId}/status`
+* `GET /v1/customers/{id}/orders`
+* `POST /v1/orders/{orderId}/cancel`
+
+---
+
+## 7 — Payment Service (Gateway + Orchestration)
+
+**Purpose:** orchestrate payment flows and connectors to acquirers, support card/ACH/wallets/BNPL, tokenization, refunds and settlement pointers. **(Keep PCI surface minimal.)**
+**Key models:** PaymentIntent, Authorization, Capture, Refund, PaymentMethod, Token.
+**Storage & scale:** tokens and sensitive data in vault/tokenization service (or external PSP); ephemeral payment state in DB; idempotency for write operations.
+**Events/topics:** `payment.authorized`, `payment.captured`, `payment.refunded`.
+**Representative endpoints:**
+
+* `POST /v1/payments/intents`
+* `POST /v1/payments/{intentId}/confirm`
+* `GET /v1/payments/{paymentId}`
+* `POST /v1/payments/{paymentId}/refund`
+* `POST /v1/payment-methods` (tokenize)
+
+---
+
+## 8 — Checkout Fraud & Risk Service
+
+**Purpose:** real-time fraud scoring at checkout, device fingerprinting, velocity rules, blacklists and chargeback prevention.
+**Key models:** FraudScore, DeviceFingerprint, RiskRule, FraudCase.
+**Storage & scale:** low-latency in-memory feature store + model server for ML scoring; historical store for training.
+**Events/topics:** `fraud.score.generated`, `fraud.case.created`.
+**Representative endpoints:**
+
+* `POST /v1/fraud/score` (score checkout/order)
+* `GET /v1/fraud/cases/{id}`
+* `POST /v1/fraud/cases/{id}/review`
+* `POST /v1/fraud/blacklist` (block entity)
+
+---
+
+## 9 — Shipping & Fulfillment Service
+
+**Purpose:** manage fulfillment workflows (single/multi-warehouse split), shipping rate shopping, carrier bookings, tracking, pickups, manifesting, and electronic paperwork.
+**Key models:** FulfillmentOrder, Shipment, Label, TrackingEvent, CarrierRate, Manifest.
+**Storage & scale:** RDBMS for fulfillment state; blob storage for labels/documents; connectors/outbound adapters for carriers.
+**Events/topics:** `shipment.created`, `shipment.tracking.updated`, `fulfillment.completed`.
+**Representative endpoints:**
+
+* `POST /v1/fulfillments` (create fulfillment for order lines)
+* `GET /v1/shipments/{shipmentId}`
+* `POST /v1/shipments/{shipmentId}/cancel`
+* `GET /v1/shipments/{shipmentId}/tracking`
+* `POST /v1/carriers/{carrierId}/rates`
+
+---
+
+## 10 — Returns & Refunds Service (RMA)
+
+**Purpose:** RMA initiation, return labels, inspection workflows, refunds/exchanges, disposition (repair/scrap).
+**Key models:** RMA, ReturnLine, Disposition, RefundInstruction, Restock.
+**Storage & scale:** RDBMS with attachments (photos); event flows to trigger reverse logistics.
+**Events/topics:** `rma.created`, `refund.issued`, `return.received`.
+**Representative endpoints:**
+
+* `POST /v1/rma` (initiate)
+* `GET /v1/rma/{rmaId}`
+* `POST /v1/rma/{rmaId}/receive`
+* `POST /v1/rma/{rmaId}/refund`
+* `GET /v1/rma/{rmaId}/labels`
+
+---
+
+# Customer & commerce experience
+
+## 11 — Customer / Identity & Profile Service
+
+**Purpose:** canonical customer records (accounts), contact methods, address book, preferences, GDPR consent and data portability pointers.
+**Key models:** Customer, Address, ContactMethod, ConsentRecord, CustomerAttribute.
+**Storage & scale:** RDBMS for canonical identity; secure store for PII; hashed identifiers for analytics.
+**Events/topics:** `customer.created`, `customer.updated`, `customer.deleted`.
+**Representative endpoints:**
+
+* `POST /v1/customers` (signup)
+* `GET /v1/customers/{customerId}`
+* `PATCH /v1/customers/{customerId}`
+* `GET /v1/customers/{customerId}/addresses`
+* `POST /v1/customers/{customerId}/consents`
+
+---
+
+## 12 — Authentication & Authorization Service (AuthN/AuthZ)
+
+**Purpose:** OAuth2/OIDC, sessions, MFA, password reset flows, social logins, client credentials for partners.
+**Key models:** User, Session, OAuthClient, Permission, Role.
+**Storage & scale:** secure token store (Redis) for sessions; user store in RDBMS; integrate with identity providers for SSO.
+**Events/topics:** `session.created`, `session.revoked`.
+**Representative endpoints:**
+
+* `POST /oauth/token`
+* `POST /v1/auth/login`
+* `POST /v1/auth/logout`
+* `POST /v1/auth/mfa/verify`
+* `GET /.well-known/openid-configuration`
+
+---
+
+## 13 — Reviews, Ratings & Q\&A Service
+
+**Purpose:** collect product reviews, ratings, questions & answers, moderation workflows, verified-purchase tagging.
+**Key models:** Review, Rating, Question, Answer, ModerationRecord.
+**Storage & scale:** document store or RDBMS; moderation queue (human + auto moderation).
+**Events/topics:** `review.submitted`, `review.approved`, `question.asked`.
+**Representative endpoints:**
+
+* `POST /v1/products/{productId}/reviews`
+* `GET /v1/products/{productId}/reviews`
+* `POST /v1/products/{productId}/questions`
+* `GET /v1/reviews/{reviewId}/moderation-status`
+* `POST /v1/reviews/{reviewId}/report`
+
+---
+
+## 14 — Search & Discovery Service
+
+**Purpose:** full-text product search, faceted search, autocomplete/suggestions, spelling correction, synonyms, relevancy tuning.
+**Key models:** SearchIndex, Suggestion, QueryProfile, SynonymSet.
+**Storage & scale:** search engine (Elasticsearch / OpenSearch / Algolia) with denormalized docs; realtime index updates from product catalog.
+**Events/topics:** `index.updated`, `product.indexed`.
+**Representative endpoints:**
+
+* `GET /v1/search?q=...&facets=...`
+* `GET /v1/search/suggest?q=...`
+* `POST /v1/search/reindex`
+* `POST /v1/search/query-profile`
+
+---
+
+## 15 — Recommendations & Personalization Service
+
+**Purpose:** real-time and batch recommendations (collaborative, content-based), merchandising rules, personalized landing pages.
+**Key models:** RecommendationModel, PersonalizationContext, CatalogEmbedding, UserSegment.
+**Storage & scale:** feature store, model registry, low-latency model serving (online) + batch compute for offline training.
+**Events/topics:** `recommendation.model.deployed`, `user.segment.updated`.
+**Representative endpoints:**
+
+* `GET /v1/recommendations?userId=...&context=product`
+* `POST /v1/personalization/segments`
+* `POST /v1/models/{modelId}/deploy`
+* `GET /v1/trending/products?category=...`
+
+---
+
+## 16 — Content Management System (CMS)
+
+**Purpose:** landing pages, product content blocks, promotions banners, blog content, templates, WYSIWYG content editing, localization.
+**Key models:** Page, ContentBlock, Template, LocaleVersion, Asset.
+**Storage & scale:** CMS DB + object store for rich media; preview & staging environments. CDN for delivery.
+**Events/topics:** `page.published`, `asset.uploaded`.
+**Representative endpoints:**
+
+* `GET /v1/pages/{slug}`
+* `POST /v1/pages`
+* `GET /v1/assets/{id}`
+* `POST /v1/contentblocks/{id}/publish`
+
+---
+
+# Marketplace & multi-seller features
+
+## 17 — Marketplace / Seller Management Service
+
+**Purpose:** onboard sellers, seller profiles, catalogs per seller, seller payouts, commission rules, seller-level fulfillment preferences.
+**Key models:** Seller, SellerCatalog, SellerPayout, CommissionRule, SellerOnboarding.
+**Storage & scale:** multi-tenant separation per seller; KYC docs in secure store.
+**Events/topics:** `seller.onboarded`, `seller.catalog.updated`.
+**Representative endpoints:**
+
+* `POST /v1/sellers` (onboard)
+* `GET /v1/sellers/{sellerId}`
+* `POST /v1/sellers/{sellerId}/catalog/sync`
+* `GET /v1/sellers/{sellerId}/payouts`
+* `POST /v1/sellers/{sellerId}/settings`
+
+---
+
+## 18 — Seller Payments & Payouts Service
+
+**Purpose:** split payments, hold/pay-out schedules, fees/commissions, reserve funds for disputes/chargebacks, generate remittance reports.
+**Key models:** Payout, SettlementBatch, CommissionRecord, Hold.
+**Storage & scale:** financial-grade DB, ledger integration, audit trails.
+**Events/topics:** `payout.generated`, `settlement.completed`.
+**Representative endpoints:**
+
+* `GET /v1/payouts/{sellerId}`
+* `POST /v1/payouts/schedule`
+* `GET /v1/settlements/{batchId}`
+* `POST /v1/charges/{orderId}/apply-commission`
+
+---
+
+# Operational & supporting services
+
+## 19 — Notifications & Communications Service
+
+**Purpose:** email/SMS/push/in-app notifications for order updates, marketing, password resets, transactional messages, templates and throttling.
+**Key models:** Notification, Template, ChannelConfig, DeliveryReceipt.
+**Storage & scale:** message queue (Kafka) and adapter layer to providers (SES/Twilio/FCM); durable receipts store.
+**Events/topics:** `notification.sent`, `notification.failed`.
+**Representative endpoints:**
+
+* `POST /v1/notifications/send`
+* `GET /v1/notifications/{id}/status`
+* `POST /v1/templates`
+* `GET /v1/templates/{id}`
+
+---
+
+## 20 — Tax Calculation & VAT Service
+
+**Purpose:** compute tax per line item, support multi-jurisdiction rules, VAT/GST, tax-exempt rules, tax invoices, and tax reporting.
+**Key models:** TaxRule, TaxRate, TaxDocument, Jurisdiction.
+**Storage & scale:** rules DB; integrate with third-party tax engines or maintain rule engine; cache rates for performance.
+**Events/topics:** `tax.rate.updated`, `tax.document.generated`.
+**Representative endpoints:**
+
+* `POST /v1/taxes/quote` (cart/order)
+* `GET /v1/taxes/rates?country=...&postcode=...`
+* `POST /v1/taxes/invoice/{orderId}`
+
+---
+
+## 21 — Analytics, BI & Reporting Service
+
+**Purpose:** dashboards (sales/KPIs), funnel analytics, OLAP cubes, event analytics, scheduled reports for finance/ops.
+**Key models:** Metric, Dashboard, Report, EventStream.
+**Storage & scale:** data lake/warehouse (Snowflake/BigQuery); ETL/CDC pipelines; pre-aggregations for dashboards.
+**Events/topics:** `metric.emitted`, `report.generated`.
+**Representative endpoints:**
+
+* `GET /v1/analytics/sales?from=&to=`
+* `POST /v1/reports/schedule`
+* `GET /v1/dashboards/{id}`
+
+---
+
+## 22 — Audit, Logging & Compliance Service
+
+**Purpose:** immutable audit trail of critical operations (orders, payments, price changes), legal holds, data export for compliance.
+**Key models:** AuditRecord, EvidenceBundle, RetentionPolicy.
+**Storage & scale:** append-only store or WORM bucket; retention policies per jurisdiction.
+**Events/topics:** `audit.record.created`.
+**Representative endpoints:**
+
+* `POST /v1/audit/records`
+* `GET /v1/audit/records?entityType=order&entityId=...`
+* `POST /v1/audit/export`
+
+---
+
+## 23 — Shipping & Logistics Partner Connectors
+
+**Purpose:** adapters to carrier APIs, multi-carrier rate shopping, parcel audits, label generation, customs docs for international shipments. (Often implemented as separate connector services per carrier.)
+**Key models:** ConnectorConfig, CarrierAccount, RateResponse, Label.
+**Storage & scale:** connectors run in isolated pods/functions; durable logs for reconciliation.
+**Events/topics:** `carrier.rate.fetched`, `carrier.label.generated`.
+**Representative endpoints:**
+
+* `POST /v1/connectors/{carrier}/rates`
+* `POST /v1/connectors/{carrier}/ship`
+* `POST /v1/connectors/{carrier}/void-label`
+
+---
+
+## 24 — Feature Flags & Experimentation Service
+
+**Purpose:** run A/B tests, feature flags per tenant, dynamic rollouts of merchandising or UI experiments.
+**Key models:** Flag, Experiment, Variant, MetricGoal.
+**Storage & scale:** low-latency flag evaluation engine (Redis + local SDK caches); event capture for experiment results.
+**Events/topics:** `experiment.started`, `flag.changed`.
+**Representative endpoints:**
+
+* `POST /v1/flags`
+* `GET /v1/flags/{flagKey}/evaluate?userId=`
+* `POST /v1/experiments/{id}/start`
+* `GET /v1/experiments/{id}/results`
+
+---
+
+## 25 — Media & Asset Management Service
+
+**Purpose:** manage images, video, thumbnails, transcoding, derivative generation, CDN invalidation, rights/license metadata.
+**Key models:** Asset, Derivative, License, Tag, TranscodeJob.
+**Storage & scale:** object store + CDN + transcoding worker cluster.
+**Events/topics:** `asset.uploaded`, `asset.transcoded`.
+**Representative endpoints:**
+
+* `POST /v1/assets` (upload)
+* `GET /v1/assets/{assetId}`
+* `POST /v1/assets/{assetId}/transcode`
+* `GET /v1/assets/{assetId}/derivatives`
+
+---
+
+### 26 — Gift Card & Store Credit Service
+
+**Purpose:** issue/redeem gift cards, virtual store credit, balances, pin/code management, expirations, and promotions integration.
+**Key models:** GiftCard, Balance, Redemption, ActivationCode, ExpiryPolicy.
+**Storage/scale:** secure DB for balances + ledger entries for audit; HSM/vault for codes if required.
+**Events:** `giftcard.issued`, `giftcard.redeemed`, `credit.adjusted`.
+**Endpoints:**
+
+* `POST /v1/giftcards` (issue)
+* `GET /v1/giftcards/{code}/balance`
+* `POST /v1/giftcards/{code}/redeem`
+* `POST /v1/storecredits/{customerId}/adjust`
+
+---
+
+### 27 — Subscriptions & Recurring Billing Service
+
+**Purpose:** subscription lifecycle, billing cycles, proration, metered billing, trials, cancellations and retention workflows.
+**Key models:** Subscription, Plan, InvoiceSchedule, MeteredUsage, ProrationRecord.
+**Storage/scale:** ledger for invoices + job scheduler for billing runs; support for large cohorts.
+**Events:** `subscription.created`, `invoice.generated`, `subscription.cancelled`.
+**Endpoints:**
+
+* `POST /v1/subscriptions`
+* `GET /v1/subscriptions/{id}`
+* `POST /v1/subscriptions/{id}/meter` (metered usage)
+* `POST /v1/subscriptions/{id}/cancel`
+
+---
+
+### 28 — Loyalty & Rewards Service
+
+**Purpose:** points/accrual, tiers, redemptions, campaign-driven incentives, expiry rules and member statements.
+**Key models:** LoyaltyAccount, PointTransaction, Tier, RewardCatalog, Redemption.
+**Storage/scale:** append-only transaction store for points + fast read cache for balances.
+**Events:** `loyalty.points.earned`, `loyalty.redeemed`, `tier.changed`.
+**Endpoints:**
+
+* `GET /v1/loyalty/{customerId}/balance`
+* `POST /v1/loyalty/{customerId}/earn`
+* `POST /v1/loyalty/{customerId}/redeem`
+* `GET /v1/loyalty/rewards`
+
+---
+
+### 29 — Affiliate & Partner Tracking Service
+
+**Purpose:** affiliate link tracking, commission attribution, campaign tracking, fraud checks and payout calculation.
+**Key models:** Affiliate, ClickEvent, Conversion, CommissionRecord, Campaign.
+**Storage/scale:** high-ingest click stream (Kafka) + attribution engine for conversions.
+**Events:** `affiliate.click`, `affiliate.conversion`, `affiliate.payout`.
+**Endpoints:**
+
+* `GET /v1/affiliate/{code}/stats`
+* `POST /v1/affiliate/{code}/conversion`
+* `GET /v1/affiliate/payouts/{affiliateId}`
+
+---
+
+### 30 — Point-of-Sale (POS) & In-Store Integration Service
+
+**Purpose:** sync inventory, accept payments in-store, offline-first orders, returns, shift management, receipts and POS reconciliation.
+**Key models:** POSOrder, Shift, Terminal, StoreInventoryDelta, ReconciliationReport.
+**Storage/scale:** offline-capable store for disconnected mode + eventual sync; reconciliation ledger.
+**Events:** `pos.sale.completed`, `pos.sync.completed`.
+**Endpoints:**
+
+* `POST /v1/pos/orders`
+* `GET /v1/pos/terminals/{id}/sync-status`
+* `POST /v1/pos/reconcile`
+
+---
+
+### 31 — Channel Manager / Omnichannel Syndication Service
+
+**Purpose:** syndicate catalog & inventory to marketplaces, social channels, comparison engines; manage per-channel overrides and feed schedules.
+**Key models:** Channel, ChannelFeed, MappedProduct, SyncTask, FeedTemplate.
+**Storage/scale:** per-channel connector queues; transform/transcode workers.
+**Events:** `channel.sync.started`, `channel.update.failed`.
+**Endpoints:**
+
+* `POST /v1/channels/{channelId}/sync`
+* `GET /v1/channels/{channelId}/status`
+* `POST /v1/channels/{channelId}/mapping`
+
+---
+
+### 32 — Product Feed & Marketplace Adapter Service
+
+**Purpose:** generate channel-specific product feeds (XML/CSV/JSON), accept marketplace orders, reconcile SKUs and map statuses.
+**Key models:** FeedJob, MappingRecord, MarketplaceOrder, ReconcileRecord.
+**Storage/scale:** feed generation workers + connector logs.
+**Events:** `feed.generated`, `marketplace.order.received`.
+**Endpoints:**
+
+* `GET /v1/feeds/{feedId}/download`
+* `POST /v1/marketplace/{marketplace}/orders`
+* `GET /v1/marketplace/{marketplace}/mappings`
+
+---
+
+### 33 — Chargeback & Dispute Management Service
+
+**Purpose:** manage chargebacks, dispute evidence collection, case workflows, interactions with payment providers and seller notifications.
+**Key models:** ChargebackCase, EvidenceItem, DisputeTimeline, Resolution.
+**Storage/scale:** long retention audit store; integration with payment gateway webhooks.
+**Events:** `chargeback.created`, `chargeback.resolved`.
+**Endpoints:**
+
+* `POST /v1/chargebacks` (create)
+* `GET /v1/chargebacks/{id}`
+* `POST /v1/chargebacks/{id}/evidence`
+* `POST /v1/chargebacks/{id}/respond`
+
+---
+
+### 34 — Refund Reconciliation Service
+
+**Purpose:** reconcile refunds across payments, orders, and accounting; handle partial refunds and batch refunds.
+**Key models:** RefundRecord, ReconciliationEntry, SettlementAdjust.
+**Storage/scale:** reconcile jobs with idempotency and retries.
+**Events:** `refund.initiated`, `refund.reconciled`.
+**Endpoints:**
+
+* `POST /v1/refunds/batch`
+* `GET /v1/refunds/{refundId}/status`
+* `POST /v1/refunds/{refundId}/reconcile`
+
+---
+
+### 35 — Accounting / General Ledger Integration Service
+
+**Purpose:** export journal entries, map sales/returns/fees to GL codes, support multi-currency, and automated posting to ERP (SAP/Oracle).
+**Key models:** JournalEntry, PostingBatch, GLMapping, CurrencyPosting.
+**Storage/scale:** durable journal store + CDC pipeline to ERP.
+**Events:** `journal.batch.ready`, `posting.confirmed`.
+**Endpoints:**
+
+* `POST /v1/accounting/journals`
+* `GET /v1/accounting/batches/{id}`
+* `POST /v1/accounting/mappings`
+
+---
+
+### 36 — Invoice Financing / BNPL Connector Service
+
+**Purpose:** integrate Buy-Now-Pay-Later providers and invoice financing partners, handling risk callbacks, settlement reconciliation and merchant onboarding.
+**Key models:** BNPLOrder, BNPLApproval, SettlementInstruction, PartnerConfig.
+**Storage/scale:** connector-level isolation + secure callbacks.
+**Events:** `bnpl.approved`, `bnpl.settled`.
+**Endpoints:**
+
+* `POST /v1/bnpl/{provider}/init`
+* `GET /v1/bnpl/{orderId}/status`
+* `POST /v1/bnpl/{provider}/webhook`
+
+---
+
+### 37 — B2B Quoting & RFQ Service
+
+**Purpose:** create negotiable quotes, request-for-quote workflows, bulk pricing, approvals, and quote-to-order conversion.
+**Key models:** RFQ, Quote, QuoteLine, ApprovalTask, BuyerTerms.
+**Storage/scale:** durable quote store + workflow engine for approvals.
+**Events:** `rfq.created`, `quote.accepted`.
+**Endpoints:**
+
+* `POST /v1/rfqs`
+* `GET /v1/quotes/{quoteId}`
+* `POST /v1/quotes/{quoteId}/accept`
+* `POST /v1/rfqs/{id}/invite-suppliers`
+
+---
+
+### 38 — Contract Pricing & Customer Catalogs (B2B)
+
+**Purpose:** per-customer catalogs, negotiated pricing, contract terms, and entitlement enforcement at checkout.
+**Key models:** Contract, CustomerCatalog, PriceOverride, Entitlement.
+**Storage/scale:** per-customer policy store with fast lookup in pricing engine.
+**Events:** `contract.signed`, `catalog.updated`.
+**Endpoints:**
+
+* `POST /v1/contracts`
+* `GET /v1/customers/{id}/catalog`
+* `POST /v1/contracts/{id}/activate`
+
+---
+
+### 39 — KYC & Seller / Marketplace Onboarding Service
+
+**Purpose:** collect KYC documents for sellers, run identity checks, sanctions screening, and maintain seller risk score.
+**Key models:** KycApplication, DocumentUpload, ScreeningResult, RiskProfile.
+**Storage/scale:** secure encrypted document store + screening adapters to 3rd-party providers.
+**Events:** `kyc.submitted`, `kyc.approved`.
+**Endpoints:**
+
+* `POST /v1/kyc/applications`
+* `GET /v1/kyc/{applicationId}/status`
+* `POST /v1/kyc/{id}/document`
+
+---
+
+### 40 — Escrow & Split-Payments Service
+
+**Purpose:** hold funds in escrow for marketplace transactions, manage release conditions, and enable complex split settlements.
+**Key models:** EscrowAccount, Hold, ReleaseCondition, SplitInstruction.
+**Storage/scale:** ledger-backed escrow with strong audit and compliance.
+**Events:** `escrow.hold.created`, `escrow.released`.
+**Endpoints:**
+
+* `POST /v1/escrow/hold`
+* `GET /v1/escrow/{holdId}`
+* `POST /v1/escrow/{holdId}/release`
+
+---
+
+### 41 — Visual Search & Image Recognition Service
+
+**Purpose:** support image-based searches, auto-tagging, similarity search, reverse-image lookup and auto-attribute extraction.
+**Key models:** ImageIndex, FeatureVector, TaggingResult, VisionModel.
+**Storage/scale:** vector DB for embeddings (Milvus, Pinecone) + model serving cluster.
+**Events:** `image.indexed`, `image.tagged`.
+**Endpoints:**
+
+* `POST /v1/visual-search/query` (upload image)
+* `POST /v1/visual-search/index`
+* `GET /v1/visual-search/similar?assetId=`
+
+---
+
+### 42 — Accessibility & Legal Compliance Checker Service
+
+**Purpose:** scan pages/content for accessibility (WCAG) issues, cookie compliance, GDPR/CCPA checks, and provide remediation suggestions.
+**Key models:** ScanJob, Violation, RemediationTask, PolicyProfile.
+**Storage/scale:** periodic/crawling jobs + reporting dashboards.
+**Events:** `scan.completed`, `violation.reported`.
+**Endpoints:**
+
+* `POST /v1/compliance/scan`
+* `GET /v1/compliance/scan/{jobId}`
+* `GET /v1/compliance/violations`
+
+---
+
+### 43 — SEO & Structured Data Service
+
+**Purpose:** generate canonical tags, sitemaps, structured schema.org output per product/page, hreflang handling, and server-side prerendering hooks.
+**Key models:** Sitemap, CanonicalMap, SchemaSnippet, SEOProfile.
+**Storage/scale:** cache prerendered pages; auto-regenerate on product/content changes.
+**Events:** `seo.sitemap.updated`, `canonical.changed`.
+**Endpoints:**
+
+* `GET /v1/seo/sitemap.xml`
+* `GET /v1/seo/schema?productId=`
+* `POST /v1/seo/refresh`
+
+---
+
+### 44 — Webhooks & Event Subscription Service
+
+**Purpose:** allow partners/apps to subscribe to events, manage webhook retries/dlq, signing, and delivery metrics.
+**Key models:** Subscription, DeliveryAttempt, WebhookSecret, BackoffPolicy.
+**Storage/scale:** high-throughput delivery engine with DLQ and per-subscriber rate limits.
+**Events:** (all domain events routed), `webhook.delivery.success`, `webhook.delivery.failed`.
+**Endpoints:**
+
+* `POST /v1/webhooks` (create subscription)
+* `GET /v1/webhooks/{id}/deliveries`
+* `POST /v1/webhooks/{id}/test`
+
+---
+
+### 45 — Developer Portal & API Key / App Management Service
+
+**Purpose:** register apps, issue API keys, manage quotas, provide SDK keys, usage dashboards and OAuth client registrations.
+**Key models:** App, ApiKey, RateLimit, UsageReport, OAuthClient.
+**Storage/scale:** tenant-scoped key store + quota enforcement.
+**Events:** `apiKey.created`, `quota.breached`.
+**Endpoints:**
+
+* `POST /v1/apps`
+* `GET /v1/apps/{appId}/keys`
+* `POST /v1/apps/{appId}/oauth/authorize`
+
+---
+
+### 46 — Audit Search & Forensics Service
+
+**Purpose:** index audit records, support fast forensics queries, export bundles for legal/regulatory requests, and tamper-evidence checks.
+**Key models:** AuditIndex, ForensicBundle, TamperProofHash, ExportJob.
+**Storage/scale:** search index + WORM/archive integration.
+**Events:** `audit.indexed`, `export.completed`.
+**Endpoints:**
+
+* `GET /v1/audit/search?q=`
+* `POST /v1/audit/export`
+* `GET /v1/audit/forensics/{id}`
+
+---
+
+### 47 — Chat & Conversational Commerce Service
+
+**Purpose:** live chat, bot-driven commerce flows, chat-to-order, transcript storage and agent escalation.
+**Key models:** ChatSession, Message, BotFlow, Transcript, ChatOrder.
+**Storage/scale:** real-time websocket clusters + transcript persistence.
+**Events:** `chat.message`, `chat.order.created`.
+**Endpoints:**
+
+* `POST /v1/chat/sessions`
+* `WS /v1/chat/sessions/{id}` (real-time)
+* `POST /v1/chat/{sessionId}/order`
+
+---
+
+### 48 — Return Logistics Optimization Service
+
+**Purpose:** optimize reverse logistics (nearest depot, cost optimization, pickup scheduling), route planning for returns and RMA consolidation.
+**Key models:** ReturnRoute, Depot, PickupWindow, CostEstimate.
+**Storage/scale:** solver/optimizer for routing; integration with carriers for pickups.
+**Events:** `return.pickup.scheduled`, `return.optimized`.
+**Endpoints:**
+
+* `POST /v1/returns/optimize`
+* `GET /v1/returns/{rmaId}/pickup-windows`
+* `POST /v1/returns/{rmaId}/schedule-pickup`
+
+---
+
+### 49 — Labeling, Barcode & Packaging Service
+
+**Purpose:** generate shipping labels, barcode/GS1 labeling, packaging rules, palletization, and print jobs for warehouses.
+**Key models:** LabelTemplate, Barcode, PackingSlip, Pallet.
+**Storage/scale:** template store + PDF/image generation workers; CDN for printable assets.
+**Events:** `label.generated`, `pallet.created`.
+**Endpoints:**
+
+* `POST /v1/labels/generate`
+* `GET /v1/labels/{id}/pdf`
+* `POST /v1/packing/palletize`
+
+---
+
+### 50 — Pricing Optimization & Revenue Management Service
+
+**Purpose:** elastic pricing models, demand forecasting, competitor scraping, price tests, margin protection and revenue rules engine.
+**Key models:** PriceCandidate, Forecast, ElasticityModel, ExperimentResult.
+**Storage/scale:** heavy batch compute + online cache for live price decisions.
+**Events:** `price.suggestion.created`, `price.test.result`.
+**Endpoints:**
+
+* `POST /v1/pricing/optimize`
+* `GET /v1/pricing/suggestions?sku=`
+* `POST /v1/pricing/test/{experimentId}/apply`

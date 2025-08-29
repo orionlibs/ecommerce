@@ -1,0 +1,401 @@
+# Inventory Metrics & Telemetry Aggregator Service — REST API surface
+
+Nice — here’s a comprehensive, focused RESTful API design for an **Inventory Metrics & Telemetry Aggregator** service. This service ingests telemetry and metrics from Inventory/WMS/3PL/warehouse devices and exposes queryable aggregates, rollups, anomaly detection, alerts, dashboards, exports and health/usage APIs. I include *only* endpoints relevant to telemetry/metrics aggregation, storage, querying, alerting, and admin for this service (no product, order, cart, pricing, or other business-domain APIs).
+
+Base conventions (applies across endpoints)
+
+* Base path: `https://api.example.com/v1/telemetry` (or `/v1/metrics`)
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT) or API keys for services. Multi-tenant via `X-Tenant-ID` header or tenant-scoped paths `/v1/tenants/{tenantId}/telemetry`.
+* Content type: `application/json`. For raw metric ingestion support `application/x-ndjson`, `application/octet-stream` (Prometheus remote\_write), or `application/vnd.kafka.binary` when relevant.
+* Time format: RFC3339 / ISO8601 with timezone.
+* Pagination: `page/limit` or cursor.
+* Common query params: `start`, `end`, `granularity` (e.g., `60s`, `1m`, `5m`, `1h`), `group_by`, `filters`, `metric`, `aggregation` (sum, avg, min, max, p50,p90), `timezone`.
+* Responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+
+---
+
+# 1. Ingestion endpoints
+
+Support push and pull ingestion, high-throughput bulk, and protocol compatibility.
+
+* `POST /v1/telemetry/ingest`
+
+  * Purpose: Push metric events (single or small batch).
+  * Body (NDJSON or JSON array): `[{ "metric":"inventory.on_hand","type":"gauge","value":125,"timestamp":"2025-08-29T12:00:00Z","dimensions":{"sku":"SKU-1","location_id":"loc_1","lot":"L1"} }, ...]`
+  * Response: `202 Accepted` with ingestion id(s) and per-record status (optionally). Supports idempotency via `Idempotency-Key` header.
+
+* `POST /v1/telemetry/ingest/bulk`
+
+  * Purpose: High-throughput bulk upload (NDJSON, compressed). Returns async job id.
+  * Body: large NDJSON file (or S3 pointer).
+  * Response: `202` with `{ "job_id":"..." }`.
+
+* `POST /v1/telemetry/prometheus/remote_write`
+
+  * Purpose: Accept Prometheus `remote_write` for compatibility.
+  * Body: protobuf stream or compatible format. Respond `200` or `202`.
+
+* `POST /v1/telemetry/opentelemetry`
+
+  * Purpose: Accept OTLP traces/metrics payloads (for device traces or spans tied to inventory ops).
+
+* `GET /v1/telemetry/pull/{connectorId}`
+
+  * Purpose: Pull-style ingestion for connectors that require polling (returns next batch or 204 if empty). Requires connector auth.
+
+* `POST /v1/telemetry/ingest/validate`
+
+  * Purpose: Validate metric payload against schema without ingesting (useful for clients).
+
+---
+
+# 2. Metrics schema & dimensions management
+
+Define metric types, allowed dimensions (labels), units, retention, and cardinality controls.
+
+* `GET /v1/telemetry/schema`
+
+  * List all registered metrics and their schema.
+
+* `GET /v1/telemetry/schema/{metricName}`
+
+  * Get definition: type (`gauge|counter|histogram|set|summary`), allowed dimensions, unit, default retention, recommended cardinality.
+
+* `POST /v1/telemetry/schema`
+
+  * Register a metric: `{ "name":"inventory.on_hand","type":"gauge","unit":"pcs","dimensions":["sku","location_id","lot"], "retention_days":365, "notes":"on-hand snapshot per location" }`.
+
+* `PATCH /v1/telemetry/schema/{metricName}` — update schema (with rules about incompatible changes).
+
+* `DELETE /v1/telemetry/schema/{metricName}` — deprecate metric.
+
+* `GET /v1/telemetry/dimensions` — list known dimension keys and sample values.
+
+* `POST /v1/telemetry/dimensions/normalize` — mapping rules (e.g., alias `warehouse_id` → `location_id`) for ingestion pipeline.
+
+---
+
+# 3. Real-time streaming & subscription
+
+Provide low-latency feeds via websockets/SSE and webhook subscriptions.
+
+* `POST /v1/telemetry/streams`
+
+  * Create a real-time stream/subscription. Body: `{ "name":"low_stock_stream","filter":{ "metric":"inventory.available","condition":"<","threshold":10, "dimensions":{ "location_id":"loc_1" } }, "transport":"sse|websocket|kafka|webhook", "delivery":{"url":"https://...","secret":"..."} }`
+  * Response: `201` stream id and connection details.
+
+* `GET /v1/telemetry/streams/{streamId}` / `PATCH` / `DELETE`
+
+* `POST /v1/telemetry/streams/{streamId}/test` — send test event.
+
+* `GET /v1/telemetry/ws/connect?stream_id=...` — (SSE/WebSocket connection endpoint) — negotiates auth.
+
+---
+
+# 4. Aggregation / Query endpoints
+
+Rich query language and aggregation APIs for dashboards and BI.
+
+* `POST /v1/telemetry/query`
+
+  * Purpose: Time-series query with JSON DSL.
+  * Body example:
+
+    ```json
+    {
+      "metric":"inventory.on_hand",
+      "start":"2025-08-01T00:00:00Z",
+      "end":"2025-08-29T12:00:00Z",
+      "granularity":"1h",
+      "aggregation":"sum",          // sum/avg/min/max/p50/p90
+      "group_by":["location_id","sku"],
+      "filters":{"location_id":["loc_1","loc_2"], "sku":"SKU-1"},
+      "fill":"zero|null|previous",
+      "timezone":"Europe/London"
+    }
+    ```
+  * Response: time buckets + groups.
+
+* `GET /v1/telemetry/query`
+
+  * Purpose: Simple GET version supporting query params for small queries.
+
+* `POST /v1/telemetry/aggregate`
+
+  * Purpose: On-demand rollup creation: define and trigger a rollup spec (e.g., daily per-sku per-location).
+
+* `POST /v1/telemetry/topk`
+
+  * Purpose: Top-K queries (e.g., top SKUs by negative delta in on\_hand) — useful for trending.
+
+* `POST /v1/telemetry/histogram`
+
+  * Purpose: Request histogram bucket aggregations for distribution metrics (e.g., pick times).
+
+* `POST /v1/telemetry/compare`
+
+  * Purpose: Compare two time-ranges or segments and return deltas and % change.
+
+* `POST /v1/telemetry/compute/derived`
+
+  * Purpose: Compute derived metrics (e.g., `days_of_stock = on_hand / avg_daily_sales`) with a specification and persist if desired.
+
+* `POST /v1/telemetry/sql`
+
+  * Purpose: (Optional) Execute SQL-like queries against time-series store (restricted to power users). Return paginated results.
+
+---
+
+# 5. Rollups, downsampling & retention management
+
+Configure pre-aggregation policies and rollup schedules.
+
+* `GET /v1/telemetry/rollups` — list rollup policies.
+
+* `POST /v1/telemetry/rollups`
+
+  * Create a rollup: `{ "name":"daily_onhand","metric":"inventory.on_hand","group_by":["sku","location_id"], "source_granularity":"1m","target_granularity":"1d","aggregation":"avg","schedule":"cron(0 1 * * *)" }`
+
+* `PATCH /v1/telemetry/rollups/{id}` / `DELETE`
+
+* `POST /v1/telemetry/retention/policies` — define retention by metric or tenant: `{ "metric":"inventory.on_hand","hot_days":30,"warm_days":60,"cold_storage":true }`
+
+* `GET /v1/telemetry/retention/policies` / `PATCH` / `DELETE`
+
+* `POST /v1/telemetry/retention/compact` — force compaction/downsampling (async job).
+
+---
+
+# 6. Anomaly detection & ML jobs
+
+Detect unusual drops/spikes (e.g., sudden stock drains), and expose anomaly jobs.
+
+* `POST /v1/telemetry/anomalies/detect`
+
+  * Purpose: Run anomaly detection over a metric/time-range (returns anomalies and scores). Body: `{ "metric":"inventory.on_hand","start":"...","end":"...","sensitivity":0.9,"algorithm":"seasonal_esd|baseline_zscore|prophet", "group_by":["location_id","sku"] }` → returns list of anomalies.
+
+* `POST /v1/telemetry/anomalies/alerts`
+
+  * Purpose: Create persistent anomaly alert rule to trigger notifications.
+
+* `GET /v1/telemetry/anomalies/{jobId}` — job status & results.
+
+* `GET /v1/telemetry/anomalies` — list detected anomalies (filterable).
+
+* `POST /v1/telemetry/ml/train` — kick off ML jobs for baseline modeling (e.g., forecasting inbound receipts, expected depletion).
+
+* `GET /v1/telemetry/ml/{jobId}` — metrics, model artifacts, explainability.
+
+---
+
+# 7. Alerts, notification channels & incident management
+
+Create alerts for thresholds, trends, anomalies, with channels and escalations.
+
+* `GET /v1/telemetry/alerts`
+
+  * List alert rules.
+
+* `POST /v1/telemetry/alerts`
+
+  * Create alert: `{ "name":"low_stock_loc1","condition":{"metric":"inventory.available","op":"<","threshold":10,"duration":"5m","group_by":["sku","location_id"]}, "severity":"critical|warning", "channels":[{"type":"email","target":"ops@acme.com"},{"type":"webhook","url":"...","secret":"..."}], "mute_window":"PT1H", "runbook_url":"https://..." }` → `201`.
+
+* `PATCH /v1/telemetry/alerts/{alertId}` / `DELETE`
+
+* `GET /v1/telemetry/alerts/{alertId}/history` — incidents triggered by this rule.
+
+* `POST /v1/telemetry/alerts/{alertId}/test` — send test notification.
+
+* `GET /v1/telemetry/incidents` — open/closed incidents, with links to underlying metric snapshots.
+
+---
+
+# 8. Dashboards & saved queries
+
+Dashboard creation and management for operations teams.
+
+* `GET /v1/telemetry/dashboards`
+* `POST /v1/telemetry/dashboards`
+
+  * Body: `{ "name":"Warehouse Overview","widgets":[{ "type":"timeseries","title":"On-hand per location","query":{...} }, ...], "layout":{...}, "owner":"team_ops" }`
+* `GET /v1/telemetry/dashboards/{id}` / `PATCH` / `DELETE`
+* `POST /v1/telemetry/dashboards/{id}/share` — share with role/team or generate read-only public token.
+* `POST /v1/telemetry/saved_queries` — store reusable query defs.
+
+---
+
+# 9. Exporting & integration endpoints
+
+Export aggregates, provide BI-friendly dumps and connectors.
+
+* `POST /v1/telemetry/exports`
+
+  * Purpose: Export query results to S3/GCS/CSV/Parquet. Body: `{ "query":{...},"format":"parquet","destination":"s3://bucket/path","compress":true }` → returns job id.
+
+* `GET /v1/telemetry/exports/{jobId}` — status + download link.
+
+* `POST /v1/telemetry/webhooks` — register webhook for specific events (anomaly, alert fired, stream events).
+
+* `POST /v1/telemetry/connectors` — create connectors to push data to SIEM/BI/Kafka/Datadog.
+
+* `GET /v1/telemetry/connectors/{id}/run|logs` — manage connector runs.
+
+---
+
+# 10. Access control, API keys & tenancy
+
+Manage who can query metrics and who can register ingestion streams.
+
+* `GET /v1/telemetry/keys`
+
+* `POST /v1/telemetry/keys` `{ "name":"inventory-wms-ingest","scopes":["ingest"], "expires_in":"90d" }` → returns key (plaintext once).
+
+* `DELETE /v1/telemetry/keys/{id}`
+
+* `GET /v1/telemetry/roles` / `POST /v1/telemetry/roles` — role-based access (viewer, editor, admin).
+
+* `GET /v1/telemetry/permissions` — check effective permissions for caller.
+
+---
+
+# 11. Usage, billing & quotas
+
+Surface usage for tenants and enforce quotas.
+
+* `GET /v1/telemetry/usage`
+
+  * Return ingestion rate, storage used, archived data, query counts, peak QPS for tenant.
+
+* `GET /v1/telemetry/quotas` / `PATCH /v1/telemetry/quotas` — set per-tenant ingestion, retention, query QPS.
+
+* `GET /v1/telemetry/billing/estimates` — optional cost estimate for retention & queries.
+
+---
+
+# 12. Jobs & async operations
+
+Large tasks (backfills, compactions, export) are async.
+
+* `GET /v1/telemetry/jobs` — list jobs (type filter: `backfill|export|compact|train`).
+
+* `POST /v1/telemetry/jobs/backfill` — backfill historical metrics from source (Inventory events), Body: `{ "source":"s3://...|inventory-service","start":"...","end":"...", "mapping":"...", "target_metric":"inventory.on_hand", "overwrite":false }` → returns job id.
+
+* `GET /v1/telemetry/jobs/{jobId}` — job status, logs, errors.
+
+* `POST /v1/telemetry/jobs/{jobId}/cancel`
+
+---
+
+# 13. Health, diagnostics & instrumentation
+
+Service health endpoints and diagnostics for SRE.
+
+* `GET /v1/telemetry/health` — overall status (ingest pipeline, storage, query engine, ml worker).
+* `GET /v1/telemetry/diagnostics` — current ingest lag, queue depth, partition skew, cardinality hot-spots.
+* `GET /v1/telemetry/metrics/internal` — internal metrics about the aggregator (useful for alerting SRE). (restricted)
+
+---
+
+# 14. Audit, compliance & retention
+
+Audit trail for ingestion modifications, schema changes, and retention actions.
+
+* `GET /v1/telemetry/audit` — audit events (who created schema, deleted data, changed retention). Filter by actor, action, date range.
+
+* `POST /v1/telemetry/retention/policies` — create tenant retention rules (hot/warm/cold, export before deletion).
+
+* `GET /v1/telemetry/retention/actions` — purge jobs and results.
+
+---
+
+# 15. Developer & test utilities
+
+Testing endpoints and SDK helper APIs.
+
+* `POST /v1/telemetry/test/generate`
+
+  * Create synthetic test data for a metric (useful for dashboards/testing). Body: `{ "metric":"inventory.on_hand","patterns":["seasonal","spike"], "duration":"7d", "rate":1000 }`
+
+* `POST /v1/telemetry/test/load` — run load test (throttled).
+
+* `GET /v1/telemetry/capabilities` — features available for tenant (anomaly\_detection, forecast, prom\_remote\_write, otlp).
+
+---
+
+# Example common payloads
+
+Ingest single gauge example:
+
+```json
+POST /v1/telemetry/ingest
+[
+  {
+    "metric":"inventory.on_hand",
+    "type":"gauge",
+    "value":125,
+    "timestamp":"2025-08-29T12:00:00Z",
+    "dimensions":{"sku":"SKU-1","location_id":"loc_1","lot":"L1","source":"scanner-A"},
+    "metadata": {"ingest_id":"evt-abc123"}
+  }
+]
+```
+
+Query example:
+
+```json
+POST /v1/telemetry/query
+{
+  "metric":"inventory.on_hand",
+  "start":"2025-08-01T00:00:00Z",
+  "end":"2025-08-29T12:00:00Z",
+  "granularity":"1h",
+  "aggregation":"avg",
+  "group_by":["sku","location_id"],
+  "filters":{"location_id":["loc_1","loc_2"]}
+}
+```
+
+Alert creation example:
+
+```json
+POST /v1/telemetry/alerts
+{
+  "name":"low_stock_critical",
+  "condition":{
+    "metric":"inventory.available",
+    "op":"<=",
+    "threshold":5,
+    "duration":"10m",
+    "group_by":["sku","location_id"]
+  },
+  "severity":"critical",
+  "channels":[{"type":"email","target":"ops@company.com"}],
+  "mute_window":"PT30M"
+}
+```
+
+---
+
+# Design considerations & best practices (brief)
+
+* **Metric schema discipline:** enforce and version metric schema to avoid high-cardinality explosions; provide warnings on cardinality.
+* **Hybrid ingest model:** accept push (API/prometheus/OTLP) and pull (connectors) with strong idempotency and backpressure handling.
+* **Tiered storage + rollups:** hot (raw, short retention) + warm (rollups) + cold (archived) to bound storage costs while supporting queries.
+* **Downsampling & pre-aggregations:** proactively create rollups for common groupings (per-sku per-location hourly/daily) to make queries fast.
+* **Anomaly & forecast workflows:** include baseline forecasting models for expected depletion and anomaly detection to reduce false positives.
+* **Low-latency alerting:** separate fast path for alert evaluation (streaming) and heavier ML jobs (batch).
+* **Backfill & reconciliation:** robust backfill jobs to recover from outages and UIs to inspect ingest gaps.
+* **Observability & SLOs:** expose ingest latency, queue depth, dropped events; enforce SLOs and per-tenant quotas.
+* **Cost controls:** expose usage and cost estimates for retention and query load; allow tenants to set auto-archive policies.
+* **Security & privacy:** redact/avoid PII in telemetry; audit schema/retention changes.
+* **APIs for operations:** provide admin endpoints for compaction, export before deletion, and forced re-computation of rollups.
+
+---
+
+If you’d like I can next:
+
+* generate an **OpenAPI skeleton** for the core ingestion + query + alerts endpoints,
+* design the **time-series storage schema** and rollup tables (example DDL for ClickHouse/TimescaleDB),
+* or produce a **sample client SDK** (Node/Python) that demonstrates safe ingestion (idempotency, batching, retry/backoff).
+
+Which of those should I produce now?

@@ -1,0 +1,158 @@
+1. Product / Product-Master Service
+2. SKU & Variant Service
+3. Attributes & Schema Service
+4. Category & Taxonomy Service
+5. Product Content / PIM Service
+6. PIM Content Authoring Service
+7. Workflow & Approval Service
+8. Validation & Data Quality Service
+9. Duplicate Detection & Merge Service
+10. Snapshot & Versioning Service
+11. Media / DAM Service
+12. Search & Indexing Service
+13. Search Suggestions / Autocomplete Service
+14. Recommendation Service
+15. Review & Ratings Service
+16. CDN Integration Layer
+17. Import / Export & Bulk Jobs Service
+18. External Connectors / Sync / Channel Connectors
+19. Channel Syndication Service
+20. Supplier / Vendor Service
+
+**Inventory & Availability**
+21. Inventory Core / On-hand Service
+22. Inventory Read Model / Query Service
+24. Reservation Service
+25. Allocation Service
+26. Warehouse Adapter / WMS Connector
+27. Inbound & Replenishment Service
+28. Stock Movement / Event Store Service
+29. Stock Reconciliation Service
+30. Forecasting & Replenishment Planner
+31. Thresholds, Alerts & Notifications
+32. Bulk Import / Migration for Inventory
+33. Inventory Audit & Compliance
+34. Inventory Metrics & Telemetry Aggregator
+
+**Pricing & Promotions**
+35. Pricing Core Service
+36. Price List & Versioning Service
+37. Price History / Audit
+38. Pricing Rules Engine
+39. Promotions Engine / Offers Service
+40. Offer / Coupons / Discount Service
+41. Eligibility & Targeting Service
+42. Price Resolver & Cache
+43. Dynamic Pricing & Demand Service
+44. Tax Integration Service
+45. Billing / Accounting / Invoicing Connector
+46. Channel Price Adapter
+47. Promotion Scheduler
+48. Pricing Import / Bulk Prices
+49. Pricing Experimentation / Feature Flags
+50. Pricing Analytics & Revenue Reporting
+51. Pricing Fraud & Abuse Detection
+
+**Cart / Checkout**
+52. Cart Service
+53. Session Service
+54. Cart Read Model / Availability API
+55. Cart Merge & Identity Service
+56. Cart Pricing & Promotions facade
+57. Coupon & Discount Service
+58. Checkout Orchestrator
+59. Abandoned Cart & Recovery Service
+60. Cart Analytics & Events Exporter
+61. Cart Bulk Import / Migration
+62. Cart Audit & Compliance
+63. Cart Telemetry & Metrics
+
+**Orders & Order Management**
+64. Order Service / Order Store
+65. Order History & Audit
+66. Customer Order Portal Backend
+67. Saga Orchestrator / Workflow Engine
+68. Admin Order Management Backend
+69. Contract & Connector Service
+70. Returns & RMA Service
+71. Refunds & Chargeback Service
+72. Order Analytics & Reporting
+73. Order Notification Service
+
+**Payments**
+74. Payment Service
+75. Payments Gateway / Orchestrator
+76. Payment Processor Adapters
+77. Tokenization / Vault Service
+78. Payment Authorizations Service
+79. Capture & Settlement Service
+80. Refunds & Reversals Service
+81. Chargeback & Dispute Management
+82. Payouts / Transfers Service
+83. Payment Reconciliation Service
+84. Payments Fraud & Risk
+85. Payments Compliance & PCI Audit
+86. Payments Webhook Delivery & Notification
+87. Payments Read Model / Reporting
+88. Payments Sandbox & Test Harness
+
+**Fulfillment & Shipping**
+89. Fulfillment Orchestrator
+90. Order Fulfillment Service
+91. Carrier Integration & Rate Shopping
+92. Warehouse Management Adapter
+93. Shipping & Carrier Service
+94. Shipping Rate & Pricing Service
+95. Labeling, Documentation & Compliance
+96. Tracking & Events Aggregator
+97. Manifesting, Batching & Run Generation
+98. Pickup / Local Delivery Service
+99. Returns & Reverse Logistics
+100. Customs, Duties & International Clearance
+101. Last-Mile Orchestration & Delivery Partner API
+102. Exceptions, Claims & Insurance Service
+103. Slot Booking & Carrier Capacity Service
+104. Fulfillment Read Model / Query Service
+105. Fulfillment Sandbox / Carrier Test Harness
+106. Fulfillment Metrics & Telemetry
+
+**Eventing, Data Platform & ML**
+107. Events & Message Broker / Event Bus
+108. Event Ingest / Collector Service
+109. Schema Registry & Contract Service
+110. Raw Event Store / Immutable Log
+111. Stream Processing & Enrichment
+112. Metrics Aggregator / Time-series Service
+113. OLAP Warehouse / ETL / Batch Loader
+114. Data Lake / Archival Service
+115. Identity Resolution / Customer 360
+116. Feature Store
+117. Model Training Platform / Pipelines
+118. Feature Serving / Real-time Scoring
+119. Experimentation & A/B Testing
+120. Attribution, Marketing Analytics, Funnel & Retention
+121. Reporting & BI API / Dashboard
+122. Data Catalog, Lineage & Governance
+123. Data Quality & Validation
+124. Anomaly Detection & Alerting
+125. Data Export / Third-party Connectors
+126. Privacy, Consent & Subject Access
+127. Access Control & Audit for Data
+128. Sandbox & Test Data Service
+129. Observability & Telemetry Aggregator
+
+**Platform & Security / Infra**
+130. API Gateway / Facade
+131. GraphQL Aggregation / Facade
+132. Admin UI Backing Services
+133. Admin UI / Admin Order
+134. Security & Permission / AuthZ
+135. Feature Flagging & Experimentation
+136. Throttling & Quotas
+137. Audit & Lineage Service
+138. Event Bus / Messaging infra
+139. Fraud & Abuse Detection
+140. Notification Service
+141. Read Model / Denormalized API Service
+142. Telemetry & Metrics Aggregator
+143. Sandbox / Test Harness

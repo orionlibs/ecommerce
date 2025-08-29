@@ -1,0 +1,4183 @@
+# Product Catalog Microservices Catalog — Comprehensive
+
+**Purpose:** A complete microservice catalog for an eCommerce product catalog domain. This document maps services, responsibilities, APIs, data ownership, events, storage, scaling and operational notes so teams can design, implement, and operate a resilient, scalable product catalog.
+
+---
+
+## Table of contents
+
+1. Overview & design principles
+2. Service list (summary)
+3. Detailed service definitions
+
+   * For each service: responsibilities, API surface, events, data model (summary), storage, SLAs, scaling & caching, failure handling, security, deployment notes
+4. Inter-service flows & event patterns
+5. Data ownership and eventual consistency patterns
+6. Recommended tech stack & infra
+7. API versioning, backwards compatibility, and testing
+8. Observability, monitoring & SLOs
+9. Appendix: example domain events & example OpenAPI snippets
+
+---
+
+## 1. Overview & design principles
+
+* **Single responsibility per service**: each microservice owns its bounded context (data + logic).
+* **Data ownership**: only one service is the source-of-truth for any piece of data.
+* **Event-driven propagation**: use domain events for async denormalization and eventual consistency.
+* **Read-optimized services**: separate read models (search/index service, read caches) for low-latency queries.
+* **API-first**: provide OpenAPI/GraphQL and semantic versioning.
+* **Security & governance**: centralized authN/Z and API Gateway.
+
+---
+
+## 2. Service list (summary)
+
+1. Product Core (product-service)
+2. SKU & Variant Service (sku-service)
+3. Pricing Service (pricing-service)
+4. Inventory & Availability Service (inventory-service)
+5. Media Service (media-service)
+6. Category & Taxonomy Service (category-service)
+7. Attributes & Specs Service (attributes-service)
+8. Product Content / PIM Service (pim-service)
+9. Search & Indexing Service (search-service)
+10. Pricing Promotions & Offers Service (offers-service)
+11. Supplier / Vendor Service (supplier-service)
+12. Import / Export & Bulk Batch Service (catalog-import-service)
+13. Audit & History Service (audit-service)
+14. Events & Message Broker (event-bus) — infrastructure component
+15. API Gateway / Facade (api-gateway)
+16. GraphQL Aggregation Service (graphql-facade)
+17. Recommendation Service (recommendation-service)
+18. Review & Ratings Service (reviews-service)
+19. Admin UI Backing Services (admin-service)
+20. Feature Flagging & Experimentation Service (feature-service)
+21. Throttling & Quotas service (rate-limit-service)
+22. Search Suggestions / Autocomplete Service (autocomplete-service)
+23. CDN Integration Layer (cdn-proxy-service)
+
+---
+
+## 3. Detailed service definitions
+
+> For each service: responsibilities + API + domain events + data owned + storage + notes.
+
+### Product Core (product-service)
+
+**Responsibilities:** Source-of-truth for product identity, lifecycle (create/publish/unpublish), base metadata (title, slug, canonical product id), relationships to SKUs and categories.
+**Primary API (REST Examples):**
+
+* `POST /products` — create product
+* `GET /products/{productId}` — fetch master product
+* `PUT /products/{productId}` — update
+* `POST /products/{productId}/publish` — publish/unpublish
+  **Domain events emitted:** `ProductCreated`, `ProductUpdated`, `ProductPublished`, `ProductUnpublished`, `ProductDeleted`.
+  **Data owned:** product\_id, name, slug, status, canonical\_sku\_id, base\_descriptions.
+  **Storage:** relational DB (e.g., PostgreSQL) for strong consistency.
+  **SLA:** write latency <200ms; SLA availability 99.9% for admin operations.
+  **Scaling:** read replicas, horizontal stateless API tier. Heavy read traffic served by read models.
+  **Notes:** Keep payloads small; store large blobs in PIM / Media service.
+
+---
+
+### SKU & Variant Service (sku-service)
+
+**Responsibilities:** Manage SKUs, variants (size/color), mapping to product, packaging, dimensions, weight, HS code.
+**API:** `POST /skus`, `GET /skus/{skuId}`, `GET /products/{productId}/skus`.
+**Events:** `SkuCreated`, `SkuUpdated`, `SkuDeleted`.
+**Data owned:** sku\_id, product\_id, attributes (color/size), barcode, dimensions.
+**Storage:** relational DB + cache (Redis) for hot SKU read.
+**Notes:** Crucial for order validation & inventory joins.
+
+---
+
+### Pricing Service (pricing-service)
+
+**Responsibilities:** Manage price records, currencies, price lists, price history, dynamic pricing rules.
+**API:** `GET /prices?sku={skuId}&currency=GBP`, `POST /prices/bulk`, `GET /price-lists`.
+**Events:** `PriceCreated`, `PriceChanged`, `PriceDeleted`.
+**Data owned:** price records by sku+currency+date-range, price rules.
+**Storage:** relational DB or time-series for history; Redis for caching resolved prices.
+**Consistency:** Source of truth for price — strong read-after-write for admin UI. CDN/cache TTL for storefront.
+**Notes:** Avoid calculating prices at query time for many SKUs; precompute resolved price where possible.
+
+---
+
+### Inventory & Availability Service (inventory-service)
+
+**Responsibilities:** Track stock levels per SKU per location, reservations, lead-times, backorder rules.
+**API:** `GET /inventory/{skuId}`, `POST /inventory/{skuId}/adjust`, `POST /reservations`.
+**Events:** `InventoryAdjusted`, `Reserved`, `ReservationReleased`, `StockDepleted`, `StockReplenished`.
+**Storage:** database with strong consistency (Postgres) and write-optimized stores. Consider CQRS: commands update authoritative store; reads via read model.
+**Scaling & latency:** High write throughput during sales; use sharding by SKU or warehouse.
+**Failure handling:** Idempotent operations, optimistic locks, compensation flows for failed reservations.
+
+---
+
+### Media Service (media-service)
+
+**Responsibilities:** Store and serve product images, videos, thumbnails, transcodes, image metadata and accessibility text.
+**API:** `POST /media` (multipart), `GET /media/{mediaId}`, `GET /media/{mediaId}/variants`.
+**Events:** `MediaUploaded`, `MediaProcessed`.
+**Storage:** Object store (S3), background processing for transforms, CDN for delivery.
+**Notes:** Store references in product/PIM; never store binaries in primary DB.
+
+---
+
+### Category & Taxonomy Service (category-service)
+
+**Responsibilities:** Category trees, breadcrumb generation, SEO slugs, hierarchical metadata.
+**API:** `GET /categories/{id}`, `GET /categories?tree=true`, `POST /categories`.
+**Events:** `CategoryCreated`, `CategoryUpdated`, `CategoryDeleted`, `CategoryReordered`.
+**Storage:** document DB or relational with closure table for tree operations.
+
+---
+
+### Attributes & Specifications Service (attributes-service)
+
+**Responsibilities:** Manage attribute definitions (datatypes, constraints, searchable flags), attribute sets per category.
+**API:** `GET /attributes`, `POST /attributes`, `GET /attributes/for-category/{categoryId}`.
+**Events:** `AttributeDefinitionCreated`, `AttributeDefinitionUpdated`.
+**Data owned:** attribute definitions, validation rules.
+
+---
+
+### Product Information Management (PIM) - pim-service
+
+**Responsibilities:** Authoring of rich product content (long descriptions, rich text, localized content), workflow (draft/review/publish), staging areas for content editors.
+**API:** `GET /pim/products/{productId}/content`, `PUT /pim/products/{productId}/content`, `POST /pim/products/{productId}/workflow/approve`.
+**Events:** `ProductContentPublished`, `ProductContentDraftSaved`.
+**Storage:** document DB (MongoDB) or CMS backing store.
+**Notes:** Integrate with media-service for assets; push publish events to product-service/search-service.
+
+---
+
+### Search & Indexing Service (search-service)
+
+**Responsibilities:** Maintain search index (Elasticsearch / OpenSearch), product listings, faceting, sorting, suggestions feed; serve storefront queries.
+**API:** `POST /search` (query DSL), `GET /products/{productId}` (from denormalized index for fast reads).
+**Events consumed:** `ProductCreated/Updated/Published`, `SkuUpdated`, `PriceChanged`, `InventoryAdjusted`, `CategoryUpdated`.
+**Data owned:** denormalized read model optimized for search.
+**Scaling:** Independent cluster scaling; replicas/shards tuned to query/write patterns.
+
+---
+
+### Offers & Promotions (offers-service)
+
+**Responsibilities:** Manage promotions, coupons, price overrides, eligibility rules.
+**API:** `POST /offers`, `POST /offers/evaluate` (input cart, returns eligible offers).
+**Events:** `OfferCreated`, `OfferExpired`.
+**Notes:** Offer evaluation must be idempotent and fast; cache active offers.
+
+---
+
+### Supplier / Vendor Service (supplier-service)
+
+**Responsibilities:** Vendor catalog, lead-times, supplier SKUs, procurement metadata.
+**API:** `GET /suppliers/{id}/products`, `POST /supplier/{id}/catalog-sync`.
+**Events:** `SupplierCatalogUpdated`.
+
+---
+
+### Import / Export & Bulk Batch Service (catalog-import-service)
+
+**Responsibilities:** CSV/Excel/XML imports and exports, validation pipelines, mapping templates, scheduled sync.
+**API:** `POST /import`, `GET /import/{jobId}/status`.
+**Events:** `ImportCompleted`, `ImportFailed`.
+**Notes:** Heavy I/O; run in separate worker fleet; use idempotent downstream events to update services.
+
+---
+
+### Audit & History Service (audit-service)
+
+**Responsibilities:** Immutable audit logs for product changes (who/when/what), compliance.
+**API:** `GET /audit?entityId={productId}`.
+**Storage:** append-only store (WAL-backed or event store); retention and archiving policies.
+
+---
+
+### GraphQL Facade (graphql-facade)
+
+**Responsibilities:** Aggregate multiple microservices into a single GraphQL endpoint for storefront apps and mobile.
+**Notes:** Keep simple resolvers; delegate heavy queries to search-service/read-models to avoid N+1.
+
+---
+
+### Recommendation & Personalization Service (recommendation-service)
+
+**Responsibilities:** ML-driven product recommendations, related products, frequently-bought-together.
+**API:** `GET /recommendations?productId=`, `POST /feedback`.
+**Data:** model artifacts, training data (anonymized).
+
+---
+
+### Reviews & Ratings Service (reviews-service)
+
+**Responsibilities:** Collect and moderate user reviews and ratings, moderation workflow, verified-buyer flags.
+**API:** `POST /products/{productId}/reviews`, `GET /products/{productId}/reviews`.
+**Events:** `ReviewCreated`, `ReviewModerated`.
+
+---
+
+## 4. Inter-service flows & event patterns
+
+* **Publish flow:** Editor publishes content in PIM → `ProductContentPublished` → Product service updates canonical state → `ProductUpdated` → Search service consumes and updates index; CDN flush if necessary.
+* **Price change flow:** Pricing updated → `PriceChanged` → Pricing cache invalidation, frontend cache purge, cart re-evaluation.
+* **Inventory change flow:** Inventory updated in inventory-service → `InventoryAdjusted` → search-service updates availability in index; cart/reservation service reacts.
+
+**Event bus:** use Kafka (or Pulsar) with topic per aggregate (`product-events`, `sku-events`, `inventory-events`). Use compacted topics for current-state and regular topics for event stream.
+
+---
+
+## 5. Data ownership and eventual consistency patterns
+
+* Each service owns its data. Read models subscribe to events to keep denormalized views.
+* Use **versioned events** and **idempotent** handlers.
+* Use *sagas* for cross-service transactional flows (e.g., large catalog import -> multiple updates).
+
+---
+
+## 6. Recommended tech stack & infra
+
+* Languages: Java/Kotlin (Spring Boot), Go, or Node.js for fast iteration.
+* Databases: PostgreSQL, MongoDB (PIM), Redis (cache), Elasticsearch/OpenSearch (search), S3 (media).
+* Messaging: Kafka or Pulsar.
+* API Gateway: Kong, AWS API Gateway, or Istio ingress.
+* CI/CD: GitHub Actions / GitLab / Jenkins; deployment to Kubernetes.
+
+---
+
+## 7. API versioning, compatibility & testing
+
+* Use semantic versioning for APIs (v1, v2). Maintain backward compatibility by supporting deprecation headers.
+* Provide contract tests (Pact) between services.
+* CI will run integration tests against test Kafka topics and ephemeral DBs.
+
+---
+
+## 8. Observability, monitoring & SLOs
+
+* Tracing: OpenTelemetry. Correlate traces across services for product read paths.
+* Metrics: request latency, db latency, event lag, index lag, error rates. Define SLOs (e.g., 95th P99 read latency for search <120ms, indexing lag <5s).
+* Logging: structured logs with request-id.
+
+---
+
+
+# Product Information Management (PIM) Microservices Catalog — Comprehensive
+
+**Purpose:** A focused, practical microservice catalog for a Product Information Management (PIM) platform. This document defines services, bounded contexts, APIs, events, data ownership, data quality pipelines, media handling, localization, workflows, and recommended operational practices to build a scalable, maintainable PIM.
+
+---
+
+## Table of contents
+
+1. Executive summary & goals
+2. Design principles for PIM microservices
+3. Service list (summary)
+4. Detailed service definitions
+
+   * responsibilities, API surface, domain events, data owned, storage, SLAs, scaling & caching, failure handling, security, deployment notes
+5. Key flows & sagas (authoring, publish, import, translation, deletion)
+6. Data governance, schema evolution & attribute management
+7. Integration patterns (ERP, OMS, storefronts, marketplace syndication)
+8. Observability, testing, and SLOs
+9. Security, compliance & access control
+10. Suggested tech stack & infra
+11. Appendix: example events, OpenAPI snippets, schema registry guidance
+
+---
+
+## 1. Executive summary & goals
+
+A PIM manages authoritative product content used across channels. Core goals are:
+
+* Single source of truth for product attributes and rich content.
+* Support for complex product models: master products, SKUs/variants, bundles, kits.
+* Multi-locale, multi-currency, multi-channel content lifecycle and translations.
+* High-quality media management and fast delivery via CDNs.
+* Workflows for collaborative authoring, review, approval, and audit.
+* Data quality, enrichment (manual + ML), and validation pipelines.
+* Reliable integrations with ERP, OMS, catalog importers, marketplaces, and storefronts.
+
+---
+
+## 2. Design principles for PIM microservices
+
+* **Bounded contexts & ownership:** each microservice owns its model and persistence.
+* **Event-driven sync:** use domain events to propagate changes and build read models.
+* **CQRS for authoring vs read:** heavy editor operations vs low-latency storefront reads.
+* **Schema registry & versioned attributes:** to allow safe evolution of attribute definitions and payloads.
+* **Idempotency & retries:** for imports and integrations.
+* **Extensibility:** plugin points for connectors, enrichment modules, and validation rules.
+
+---
+
+## 3. Service list (summary)
+
+1. Product Master Service (product-master)
+2. Variant & SKU Service (variant-service)
+3. Attribute & Schema Service (schema-service)
+4. Localization & Translation Service (translation-service)
+5. Media / DAM Service (media-service)
+6. PIM Content Authoring Service (authoring-service)
+7. Workflow & Approval Service (workflow-service)
+8. Validation & Data Quality Service (quality-service)
+9. Enrichment / ML Service (enrichment-service)
+10. Taxonomy & Category Service (taxonomy-service)
+11. Relationship & Bundles Service (relationships-service)
+12. Staging & Publishing Service (publish-service)
+13. Channel Syndication Service (syndication-service)
+14. Import / Export & Bulk Jobs Service (import-service)
+15. External Connectors / Sync Service (connectors-service)
+16. Audit & Lineage Service (audit-service)
+17. Read Model / Denormalized API Service (read-model-service)
+18. Search Indexing Service (search-index-service)
+19. Event Bus / Messaging Infrastructure (event-bus)
+20. Admin UI Backend (admin-service)
+21. GraphQL/Facade Service (graphql-facade)
+22. Security & Permission Service (authz-service)
+23. Feature Flag & Experiments Service (feature-service)
+24. Snapshot & Versioning Service (snapshot-service)
+25. Duplicate Detection & Merge Service (dedupe-service)
+
+---
+
+## 4. Detailed service definitions
+
+> Each microservice below includes responsibilities, API examples, domain events, data owned, storage, scaling, and operational notes.
+
+### Product Master Service (product-master)
+
+**Responsibilities:** Source-of-truth for product entities (master records), canonical identifiers, business-level metadata (product lifecycle, primary category, brand, manufacturer, canonical\_title)
+**APIs:** `POST /products`, `GET /products/{id}`, `PATCH /products/{id}`, `GET /products?filter=...`
+**Events emitted:** `ProductCreated`, `ProductUpdated`, `ProductDeleted`, `ProductStateChanged`.
+**Data owned:** product\_id, canonical attributes, status, brand, manufacturer, canonical\_sku\_id.
+**Storage:** Relational DB (Postgres) with strong consistency.
+
+---
+
+### Variant & SKU Service (variant-service)
+
+**Responsibilities:** Model variants and SKU-level attributes (barcode, package, dimensions), mapping to product master.
+**APIs:** `POST /skus`, `GET /skus/{skuId}`, `GET /products/{productId}/skus`.
+**Events:** `SkuCreated`, `SkuUpdated`, `SkuMerged`.
+**Notes:** Exposes SKU-level hooks for inventory and pricing systems.
+
+---
+
+### Attribute & Schema Service (schema-service)
+
+**Responsibilities:** Manage attribute definitions, types, constraints, validation rules, attribute groups, attribute inheritance, and attribute visibility per channel.
+**APIs:** `GET /schemas/{schemaId}`, `POST /attributes`, `PUT /attributes/{id}`.
+**Events:** `AttributeDefinitionCreated`, `AttributeDefinitionUpdated`, `SchemaVersionPublished`.
+**Notes:** Backed by schema registry; all product content payloads validated against published schemas.
+
+---
+
+### Localization & Translation Service (translation-service)
+
+**Responsibilities:** Manage locale-specific values, translation workflows, translation memory integration, and machine translation (MT) connectors.
+**APIs:** `POST /translations/{productId}`, `GET /translations/{productId}?locale=fr-FR`.
+**Events:** `TranslationRequested`, `TranslationCompleted`, `TranslationPublished`.
+**Notes:** Supports placeholders for media, attribute-level translation, and review/QA flags.
+
+---
+
+### Media / DAM Service (media-service)
+
+**Responsibilities:** Store, process (transcode, resize, generate thumbnails), tag, and serve images/videos/docs. Maintain metadata, captions, alt-text, and rights-management.
+**APIs:** `POST /media`, `GET /media/{id}`, `GET /media/{id}/variants`.
+**Events:** `MediaUploaded`, `MediaTagged`, `MediaProcessed`.
+**Storage:** Object store (S3), background workers for processing, CDN delivery.
+
+---
+
+### PIM Content Authoring Service (authoring-service)
+
+**Responsibilities:** Provide transactional editor workflows (drafts, autosave), optimistic locking, change sets, field-level edit history; expose edit-time validations.
+**APIs:** `POST /drafts`, `PUT /drafts/{draftId}`, `POST /drafts/{id}/commit`.
+**Events:** `DraftSaved`, `DraftCommitted`.
+**Notes:** Connects with workflow-service for review/approval.
+
+---
+
+### Workflow & Approval Service (workflow-service)
+
+**Responsibilities:** Define approval flows, roles, task assignments, reviewer notifications, escalations, and audit trail for approvals.
+**APIs:** `POST /workflows`, `POST /workflows/{id}/start`, `POST /tasks/{taskId}/complete`.
+**Events:** `WorkflowStarted`, `TaskCompleted`, `ApprovalGranted`, `ApprovalRejected`.
+
+---
+
+### Validation & Data Quality Service (quality-service)
+
+**Responsibilities:** Run validations (schema, business rules), completeness checks, mandatory-attribute enforcement, and produce quality scores per product.
+**APIs:** `POST /validate?productId=`, `GET /quality/{productId}`.
+**Events:** `ProductValidated`, `ProductQualityChanged`.
+**Notes:** Can execute rules synchronously in authoring or asynchronously in batch.
+
+---
+
+### Enrichment / ML Service (enrichment-service)
+
+**Responsibilities:** Automated enrichment: image tagging, attribute extraction from images and documents, auto-generated descriptions, category prediction, canonical title/synonym generation.
+**APIs:** `POST /enrich?productId=`, `GET /enrichment/{jobId}/status`.
+**Events:** `EnrichmentCompleted`.
+**Notes:** Model training pipelines live outside microservices (ML infra) but expose inference endpoints.
+
+---
+
+### Taxonomy & Category Service (taxonomy-service)
+
+**Responsibilities:** Category hierarchies, mapping categories to attribute sets, SEO metadata, breadcrumb generation.
+**APIs:** `GET /categories/tree`, `POST /categories`.
+**Events:** `CategoryUpdated`, `CategoryReordered`.
+
+---
+
+### Relationship & Bundles Service (relationships-service)
+
+**Responsibilities:** Manage related products, upsell/cross-sell sets, bundles, kits, and their constraints (compatibility rules).
+**APIs:** `POST /bundles`, `GET /products/{id}/relations`.
+**Events:** `BundleCreated`, `RelationshipUpdated`.
+
+---
+
+### Staging & Publishing Service (publish-service)
+
+**Responsibilities:** Stage content for channels, maintain release windows, schedule publishes, create snapshots, coordinate downstream publishes (search, storefronts, CDN purges).
+**APIs:** `POST /publish`, `GET /publish/{jobId}/status`.
+**Events:** `PublishScheduled`, `PublishCompleted`, `PublishFailed`.
+**Notes:** Implements sagas to orchestrate multi-target publishes.
+
+---
+
+### Channel Syndication Service (syndication-service)
+
+**Responsibilities:** Transform and map PIM payloads to channel-specific schemas (marketplace feeds, POS, mobile apps), manage feed formats (CSV, XML, JSON), and per-channel throttling & retries.
+**APIs:** `POST /syndicate?channel=amazon`, `GET /channels/{id}/status`.
+**Events:** `SyndicationStarted`, `SyndicationCompleted`.
+
+---
+
+### Import / Export & Bulk Jobs Service (import-service)
+
+**Responsibilities:** File ingestion, mapping templates, validation, async job management, dedupe on ingest, and incremental sync support.
+**APIs:** `POST /imports`, `GET /imports/{jobId}`.
+**Events:** `ImportStarted`, `ImportCompleted`, `ImportFailed`.
+**Notes:** Use worker fleet, apply backpressure, and provide idempotency tokens.
+
+---
+
+### External Connectors / Sync Service (connectors-service)
+
+**Responsibilities:** Reliable adapters to ERP, OMS, supplier feeds, marketplaces; support push and pull modes; configurable mapping and filters.
+**APIs:** `POST /connectors/{id}/sync`, `GET /connectors/{id}/status`.
+**Events:** `ConnectorSyncStarted`, `ConnectorSyncCompleted`.
+
+---
+
+### Audit & Lineage Service (audit-service)
+
+**Responsibilities:** Immutable change logs, who/when/what, provenance of attribute values, previous value snapshots for compliance.
+**APIs:** `GET /audit?entity=product&entityId=123`, `POST /audit/query`.
+**Storage:** Append-only store or event store with archiving policies.
+
+---
+
+### Read Model / Denormalized API Service (read-model-service)
+
+**Responsibilities:** Serve storefront and admin reads from denormalized views optimized by channel and locale.
+**APIs:** `GET /public/products/{id}`, `GET /public/catalog?category=...`.
+**Notes:** Subscribes to event bus and maintains channel-specific denormalized indices.
+
+---
+
+### Search Indexing Service (search-index-service)
+
+**Responsibilities:** Build and maintain search indices, facets, autocomplete data, and channel-specific boosts. Listens to events and updates indexes.
+**APIs:** `POST /index/rebuild`, `POST /search` (proxy to ES/OpenSearch).
+
+---
+
+### Snapshot & Versioning Service (snapshot-service)
+
+**Responsibilities:** Keep historical snapshots of entire product state per publish event, support point-in-time rollbacks and preview environments.
+**APIs:** `POST /snapshots/{publishId}`, `GET /snapshots/{publishId}`.
+
+---
+
+### Duplicate Detection & Merge Service (dedupe-service)
+
+**Responsibilities:** Identify potential duplicates using probabilistic matching, present merge candidates to editors, and perform merges with lineage preservation.
+**APIs:** `POST /dedupe/scan`, `POST /dedupe/merge`.
+
+---
+
+## 5. Key flows & sagas
+
+* **Authoring flow:** Editor creates draft → authoring-service saves draft → quality-service validates → workflow-service assigns reviewers → upon approval authoring commits → publish-service stages and triggers publish saga.
+* **Import flow:** CSV/XML upload → import-service validates & normalizes → dedupe-service scans → authoring-service creates drafts or direct commits depending on rules → audit & lineage logged.
+* **Translation flow:** translation-service requests MT + TM, returns drafts → translation reviewers approve → translation published → publish-service pushes localized content to channel.
+
+---
+
+## 6. Data governance, schema evolution & attribute management
+
+* Use **schema-service** as central registry. Support schema versions. Products reference schema version applied.
+* Provide UI for attribute lifecycle: propose → approve → publish.
+* Use migration runners to backfill attribute changes when schema upgrades are applied.
+
+---
+
+## 7. Integration patterns
+
+* **Outbound push:** publish-service pushes to connectors-service which retries & backs off on failures.
+* **Inbound pull:** connectors poll ERP/feeds and create messages into import-service.
+* **Contract tests:** use Pact or similar for connectors and adapter teams.
+
+---
+
+## 8. Observability, testing & SLOs
+
+* Metrics: event lag, validation error rate, publish success rate, import throughput.
+* Tracing: OpenTelemetry traces across authoring → workflow → publish.
+* Contract & integration tests, plus chaos testing for worker fleets.
+
+---
+
+## 9. Security & compliance
+
+* RBAC at field-level for sensitive attributes (cost, supplier info).
+* Data encryption at rest & in transit.
+* PII scrubbing and retention controls in audit-service.
+
+---
+
+## 10. Suggested tech stack & infra
+
+* Services: Java (Spring Boot), Kotlin, Go, or Node.js.
+* DBs: Postgres for transactional, MongoDB/Cassandra for document-oriented content, Redis for caches, Elasticsearch/OpenSearch for search.
+* Messaging: Kafka or Pulsar.
+* Object storage: S3-compatible.
+* Kubernetes for orchestration, ArgoCD for GitOps.
+
+---
+
+# Inventory Microservices Catalog
+
+*Comprehensive catalog of microservices, APIs, events, data models, integration patterns, non-functional requirements, operational runbooks, and deployment guidance for an eCommerce Inventory Service.*
+
+---
+
+## Table of Contents
+
+1. Overview & Goals
+2. High-level domain model
+3. Microservice catalog (detailed)
+
+   * 3.1 SKU Master (Product-SKU) Service
+   * 3.2 Inventory Core (On-hand) Service
+   * 3.3 Reservation Service
+   * 3.4 Allocation Service
+   * 3.5 Warehouse Adapter / Warehouse Service
+   * 3.6 Inbound & Replenishment Service
+   * 3.7 Stock Movement / Event Store Service
+   * 3.8 Stock Reconciliation Service
+   * 3.9 Forecasting & Replenishment Planner
+   * 3.10 Thresholds, Alerts & Notifications Service
+   * 3.11 Inventory Read Model / Query Service
+   * 3.12 Bulk Import / Migration Service
+   * 3.13 Audit & Compliance Service
+   * 3.14 Metrics & Telemetry Aggregator
+4. Cross-cutting patterns & architecture
+
+   * API gateway & BFF
+   * Data partitioning & sharding
+   * Consistency, transactions & sagas
+   * Caching & CQRS
+   * Eventing & streaming patterns
+   * Idempotency & retries
+   * Security
+5. Data models (canonical)
+6. API design guidelines & examples (REST + events)
+7. Events catalogue (topics, schemas, retention suggestions)
+8. Observability, monitoring & alerting
+9. Testing, QA & contract testing
+10. CI/CD, deployment & scaling guidance
+11. Operational runbook (common incidents & playbooks)
+12. Capacity planning and cost considerations
+13. Migration & backward compatibility strategy
+14. Appendix: sample OpenAPI snippets, sample event schemas
+
+---
+
+# 1. Overview & Goals
+
+**Mission:** Provide a robust, scalable, observable inventory microservices platform that maintains accurate on-hand, reserved, and allocated stock for eCommerce across multiple SKUs, sellers, warehouses, and channels; supports low-latency queries for storefronts; ensures correctness for orders and fulfillment workflows; and supports automatic replenishment and operational visibility.
+
+**Key non-functional goals:**
+
+* High availability (SLA: 99.95% for read APIs, 99.9% for write-critical flows)
+* Low read latency (<50ms p95 for storefront queries)
+* Correctness for order-critical flows (stronger consistency when necessary)
+* Eventual consistency where acceptable to scale
+* Horizontal scalability and multi-DC/multi-region support
+* Observability, auditability, and clear failure compensation
+
+# 2. High-level domain model
+
+Primary domain entities (canonical):
+
+* **SKU** (Stock Keeping Unit) — canonical identifier for saleable unit, mapped to product/catalog
+* **StockItem** — inventory record by SKU + location (warehouse/fulfillment center)
+* **OnHand** — quantity physically available in a location
+* **Reserved** — quantity reserved for confirmed but not yet fulfilled orders
+* **Allocated** — quantity reserved and assigned to a specific fulfillment / pick run
+* **Inbound** — scheduled quantities arriving
+* **StockMovement** — ledger entry of stock changes (receipts, adjustments, transfers, picks)
+* **InventoryEvent** — event messages describing changes
+
+# 3. Microservice catalog (detailed)
+
+> Each microservice includes: responsibilities, API contract (key endpoints), event contracts, storage model, partitioning/sharding key, consistency model, typical SLAs, scaling strategy, and failure modes & compensations.
+
+---
+
+## 3.1 SKU Master (Product-SKU) Service
+
+**Responsibilities**
+
+* Maintain canonical SKU definitions and metadata (SKU id, external ids, dimensions, weight, unit-of-measure, lots/batches allowed, expiry rules)
+* Manage SKU-to-product/catalog mappings and lifecycle (active, deprecated)
+* Basic validation and enrichment (package details for picking/packing)
+
+**APIs (examples)**
+
+* `GET /skus/{skuId}` → SKU details
+* `POST /skus` → create SKU
+* `PUT /skus/{skuId}` → update SKU
+* `GET /skus?filter=...` → search
+
+**Events**
+
+* `sku.created` { skuId, name, attributes }
+* `sku.updated` { skuId, changes }
+* `sku.deprecated` { skuId, reason }
+
+**Storage**: relational DB (Postgres) or document store — moderate sizing. Primary key: `skuId`.
+
+**Consistency**: Strong for SKU read/writes; SKU changes usually small.
+
+**SLA**: 99.9% availability. Read-heavy, relatively small scale vs inventory data.
+
+**Failure modes & compensation**
+
+* If SKU deleted in error — require audit trail and compensating `sku.updated` to restore.
+
+---
+
+## 3.2 Inventory Core (On-hand) Service
+
+**Responsibilities**
+
+* Maintain canonical on-hand quantities per (skuId, locationId, lot/batch?)
+* Provide transactional endpoints for increment/decrement of on-hand
+* Public read endpoints for available quantity (onHand - reserved - allocated)
+* Publish events for state changes
+
+**APIs (examples)**
+
+* `GET /inventory/{skuId}?location={loc}` → {onHand, reserved, allocated, available}
+* `POST /inventory/{skuId}/adjust` → {delta, reason, idempotencyKey}
+* `POST /inventory/{skuId}/transfer` → transfer between locations
+* `GET /inventory/locations/{locationId}/summary`
+
+**Example adjust payload**
+
+```json
+{ "skuId": "SKU-123", "locationId": "WH-1", "delta": -2, "reason": "picked_for_order", "orderId": "ORD-1001", "idempotencyKey": "uuid-..." }
+```
+
+**Events published**
+
+* `inventory.onhand.updated` { skuId, locationId, onHand, delta, causationId }
+* `inventory.available.updated` (if available changes)
+
+**Storage**: write-optimized datastore with strong conditional updates — e.g. Postgres with `SELECT FOR UPDATE` or CockroachDB for distributed strong consistency; or use Cassandra with lightweight transactions per partition if scaled horizontally.
+
+**Partition key**: `skuId` or `(skuId, locationId)` depending on scale.
+
+**Consistency**: Strong consistency for decrement operations that are order-critical. Use compare-and-set (CAS) or optimistic concurrency with version numbers.
+
+**Scaling**: Horizontal by sharding on `skuId`. Read replicas for query load.
+
+**Idempotency**: All mutating endpoints require `idempotencyKey`.
+
+**Failure modes & compensation**
+
+* Concurrent decrements causing oversell: reject with `409 CONFLICT` and provide current available quantity; upstream should trigger reservation rollback or retry with allocation strategies.
+* Persistent DB outage: degrade to read-only and redirect writes to a durable queue for replay.
+
+**SLA**: 99.95% reads, 99.9% for write flows.
+
+---
+
+## 3.3 Reservation Service
+
+**Responsibilities**
+
+* Create/confirm/cancel reservations for orders or carts
+* Enforce reservation TTL (expiration of holds for unpaid cart)
+* Maintain reservation ledger and publish events
+* Support multiple reservation strategies (soft hold for cart, hard hold for confirmed order)
+
+**APIs**
+
+* `POST /reservations` → create reservation (items array, orderId optional, holdType: soft/hard, ttl)
+* `GET /reservations/{reservationId}`
+* `POST /reservations/{reservationId}/confirm`
+* `POST /reservations/{reservationId}/cancel`
+
+**Sample create reservation payload**
+
+```json
+{
+  "reservationId": "res-uuid-1",
+  "orderId": "ORD-1001",
+  "items": [{"skuId":"SKU-123","quantity":2,"locationPreference":["WH-1","WH-2"]}],
+  "holdType": "hard",
+  "ttlSeconds": 600,
+  "idempotencyKey": "..."
+}
+```
+
+**Interactions**
+
+* On create, Reservation Service calls Inventory Core to atomically decrement available (or ask Inventory Core to place a reservation record). That call must be transactional or use a saga.
+* On expiration, Reservation Service cancels and emits `reservation.expired` → Inventory Core increments available back (or reconciliation triggered).
+
+**Events**
+
+* `reservation.created`, `reservation.confirmed`, `reservation.cancelled`, `reservation.expired`
+
+**Storage**: persistent store (Postgres) with TTL index or background sweeper to clean expired soft holds.
+
+**Consistency**: For hard holds used by confirmed orders, stronger guarantees; for soft holds (cart), eventual consistency acceptable.
+
+**Failure modes**
+
+* Missed TTL cleanup → stale reservations blocking stock — mitigation: reconciliation job and periodic scan.
+* Race between reservation confirm and stock transfer — ensure idempotent operations and reservation versioning.
+
+---
+
+## 3.4 Allocation Service
+
+**Responsibilities**
+
+* Assign reserved items to a specific pick/packing/fulfillment workflow and location
+* Track allocation lifecycle (allocated -> picked -> packed -> shipped)
+* Coordinate with Warehouse Adapter and Fulfillment
+
+**APIs**
+
+* `POST /allocations` { reservationId, picks: \[...] }
+* `GET /allocations/{allocationId}`
+* `POST /allocations/{allocationId}/release`
+
+**Events**
+
+* `allocation.created`, `allocation.released`, `allocation.completed`
+
+**Storage**: transactional store mapping reservationId → pick jobs. Partition on warehouse.
+
+**Consistency**: Strong between allocation and warehouse operations.
+
+**Failure modes**
+
+* Allocation to non-existent stock — validate with Inventory Core before creating allocation (or use compensation).
+
+---
+
+## 3.5 Warehouse Adapter / Warehouse Service
+
+**Responsibilities**
+
+* Talk to the WMS (Warehouse Management System) or robotic picking system
+* Translate internal allocation/pick events to WMS commands (create pick list, confirm pick/ship)
+* Receive inbound confirmations (receipts, putaway)
+
+**APIs**
+
+* `POST /warehouse/{whId}/pick` → create pick job
+* `POST /warehouse/{whId}/confirm-pick` → webhook/callback from WMS
+* `POST /warehouse/{whId}/receive` → record inbound receipt
+
+**Events**
+
+* `warehouse.pick.created`, `warehouse.pick.completed`, `warehouse.receipt.completed`
+
+**Integration**: adapter connectors per WMS vendor. Implement retry/backoff and message dedup.
+
+---
+
+## 3.6 Inbound & Replenishment Service
+
+**Responsibilities**
+
+* Manage purchase orders, inbound shipments, expected receipts
+* Match ASN (advance shipping notices) to POs and create incoming stock movements
+* Trigger receipts into Inventory Core
+
+**APIs**
+
+* `POST /inbounds` create inbound shipment
+* `POST /inbounds/{inboundId}/receive` receive items
+
+**Events**
+
+* `inbound.created`, `inbound.received`, `inbound.adjusted`
+
+**Failure modes**
+
+* Mismatched counts — create discrepancy report and route to reconciliation.
+
+---
+
+## 3.7 Stock Movement / Event Store Service
+
+**Responsibilities**
+
+* Append-only ledger of stock movements for audit & replay
+* Provide readonly views for analytics and reconciliation
+* Enable replay of events to rebuild read-models
+
+**APIs**
+
+* `GET /movements?skuId=...&from=...&to=...`
+* `POST /movements` (internal)
+
+**Storage**: immutable event store (Kafka + topic per partition, or Append-only DB)
+
+**Events**
+
+* Every change should generate a `stock.movement` event with `movementId`, `type` (receipt/pick/adjust/transfer), `delta`, `prevBalance`, `newBalance`, `causationId`.
+
+**SLAs**: durable, high retention (90-365 days depending on compliance), backup/archival to long-term storage.
+
+---
+
+## 3.8 Stock Reconciliation Service
+
+**Responsibilities**
+
+* Periodic / ad-hoc reconciliation between on-hand and physical counts
+* Run variance analysis and create adjustment proposals
+* Support manual review workflow and automated adjustments
+
+**APIs**
+
+* `POST /reconciliations` start job
+* `GET /reconciliations/{id}` status
+* `POST /reconciliations/{id}/apply` apply adjustments
+
+**Events**
+
+* `reconciliation.report.ready`, `reconciliation.applied`
+
+**Failure modes**
+
+* Large variance caused by double-picking — produce alerts and hold affected SKUs from sales until resolved.
+
+---
+
+## 3.9 Forecasting & Replenishment Planner
+
+**Responsibilities**
+
+* Analyze sales velocity, lead times, safety stock policies
+* Generate replenishment proposals and suggested purchase orders
+* Provide parameters (reorder point, safety stock, order-up-to level)
+
+**APIs**
+
+* `GET /forecast/{skuId}`
+* `POST /replenishment-proposals` (bulk)
+
+**Notes**
+
+* This service is computationally heavy and may use ML pipelines. It subscribes to sales and movement events.
+
+---
+
+## 3.10 Thresholds, Alerts & Notifications Service
+
+**Responsibilities**
+
+* Enforce low-stock alerts, overstock alerts, SKU expiry notifications
+* Offer subscription for business users and automated rules (Slack, email, PagerDuty)
+
+**APIs**
+
+* `POST /alerts/rules`
+* `GET /alerts/{ruleId}/instances`
+
+**Events**
+
+* `alert.triggered`, `alert.resolved`
+
+---
+
+## 3.11 Inventory Read Model / Query Service
+
+**Responsibilities**
+
+* Serve low-latency read views optimized for storefronts and admin UIs
+* Denormalize and materialize views from event streams (CQRS)
+
+**APIs**
+
+* `GET /availability/sku/{skuId}`
+* `GET /availability/bulk?skuIds=...`
+
+**Implementation**
+
+* Use a read-optimized DB (Redis for hot, ElasticSearch for faceted queries, or Postgres read replica) built from the event stream. Keep eventual consistency guarantees documented.
+
+---
+
+## 3.12 Bulk Import / Migration Service
+
+**Responsibilities**
+
+* Import catalogs, initial stock levels, stock adjustments in bulk
+* Provide idempotent bulk processing and progress monitoring
+
+**APIs**
+
+* `POST /bulk/imports` upload manifest
+* `GET /bulk/imports/{id}/status`
+
+**Safety**
+
+* Validate and run in a sandbox mode with dry-run. Create audit logs for each row.
+
+---
+
+## 3.13 Audit & Compliance Service
+
+**Responsibilities**
+
+* Centralize immutable audit for stock changes, who triggered them, and causation (orderId, userId)
+* Provide export for compliance and finance
+
+**APIs**
+
+* `GET /audit?skuId=...&from=...&to=...`
+
+**Storage**: WORM-style storage, long retention, cryptographic hashes for non-repudiation if required.
+
+---
+
+## 3.14 Metrics & Telemetry Aggregator
+
+**Responsibilities**
+
+* Collect domain-specific metrics (stockouts, reservations created/expired, reconciliation variance)
+* Aggregate counters for dashboards and alerts
+
+**Exposed Metrics**
+
+* `inventory.onhand.count`, `reservations.active`, `allocations.pending`, `stockout.rate`, `reconciliation.variance`
+
+---
+
+# 4. Cross-cutting patterns & architecture
+
+## API Gateway & BFF
+
+* All public-facing APIs should be routed through an API Gateway that handles auth, rate limiting, caching headers, and canary routing for versions.
+* Provide a BFF for storefront-specific aggregation minimizing client calls (batch availability lookups).
+
+## Data partitioning & sharding
+
+* Shard by `skuId` or `locationId` depending on the topology. SKU-centric systems benefit from `skuId` sharding; warehouse-heavy setups may shard by `warehouseId`.
+
+## Consistency, transactions & sagas
+
+* Use local transactions for single-service operations.
+* Use Sagas (or choreography + orchestration) for cross-service flows (order -> reservation -> allocation -> pick). Prefer event-driven choreography; use orchestrator for complex multi-step flows.
+* Example saga for order flow:
+
+  1. Order Service emits `order.placed`.
+  2. Reservation Service creates reservation and emits `reservation.created` or `reservation.failed`.
+  3. Allocation Service listens to `reservation.created`, attempts allocation, emits `allocation.created` or `allocation.failed`.
+  4. If any step fails, publish compensating events to rollback previous steps.
+
+## Caching & CQRS
+
+* Use CQRS: write models handled by master services; read models built and materialized by read services.
+* Cache hot SKU availability in Redis with short TTL and event-driven cache invalidation.
+
+## Eventing & streaming patterns
+
+* Use topics: `inventory.events`, `reservations.events`, `allocations.events`, `warehouse.events`.
+* Use Kafka (or managed streaming) with partitioning by `skuId`.
+* Provide schema registry (Avro/JSON Schema) to manage compatibility.
+
+## Idempotency & retries
+
+* All mutating operations require `idempotencyKey`. Services must persist idempotency keys (or use dedup store) for a TTL (e.g., 7 days).
+* Use exponential backoff with jitter for retries. Short-circuit retries for deterministic failures (validation errors).
+
+## Security
+
+* AuthN: OAuth2 / JWT tokens issued by central identity provider.
+* AuthZ: fine-grained RBAC for admin APIs. Use service-to-service mutual TLS or mTLS.
+* Data at rest: encryption for PII and critical audit logs. Data in transit: TLS everywhere.
+
+# 5. Data models (canonical)
+
+**StockItem**
+
+```json
+{
+  "skuId": "SKU-123",
+  "locationId": "WH-1",
+  "lotId": "LOT-2025-07-01",
+  "onHand": 100,
+  "reserved": 5,
+  "allocated": 2,
+  "available": 93,
+  "lastUpdated": "2025-08-01T12:34:56Z",
+  "version": 42
+}
+```
+
+**Reservation**
+
+```json
+{
+  "reservationId": "res-uuid",
+  "orderId": "ORD-1",
+  "items": [{"skuId":"SKU-1","quantity":2,"locationId":"WH-1"}],
+  "holdType": "soft",
+  "expiresAt": "2025-08-01T13:00:00Z",
+  "status": "active"
+}
+```
+
+**StockMovement**
+
+```json
+{
+  "movementId": "move-uuid",
+  "skuId": "SKU-123",
+  "locationId": "WH-1",
+  "delta": -2,
+  "type": "pick",
+  "causationId": "allocation-uuid",
+  "timestamp": "2025-08-01T12:36:00Z"
+}
+```
+
+# 6. API design guidelines & examples (REST + events)
+
+* Use semantic HTTP codes (`200`, `201`, `202` for accepted async, `400` for validation, `409` for conflict/optimistic lock, `500` for server error).
+* Provide `Retry-After` headers for backoff guidance when rate limited.
+* Support bulk endpoints (e.g., `POST /inventory/bulk-adjust`) with partial success responses and each item-level status.
+* For asynchronous work, return `202 Accepted` with `Location` header to poll job status.
+
+**Example REST: Adjust on-hand**
+`POST /inventory/adjust`
+Response:
+
+```json
+{ "status": "accepted", "jobId": "job-uuid" }
+```
+
+When completed `inventory.onhand.updated` event is emitted.
+
+# 7. Events catalogue (topics, schemas, retention suggestions)
+
+* `sku.created` — schema: { skuId, attributes }
+* `inventory.onhand.updated` — { skuId, locationId, onHand, delta, causationId }
+* `reservation.created` — { reservationId, items, ttlSeconds }
+* `allocation.created` — { allocationId, reservationId, picks }
+* `inbound.received` — { inboundId, skuId, qty, locationId }
+* `stock.movement` — canonical ledger entry
+
+**Retention**: Keep recent events hot in Kafka for 7–30 days, archive older to S3/long-term store for 1–3 years depending on compliance.
+
+# 8. Observability, monitoring & alerting
+
+**Logs**
+
+* Structured JSON logs with `traceId`, `spanId`, `causationId`, `service`, `env`, `level`, `message`, `payloadSummary`.
+
+**Traces**
+
+* Instrument critical flows (order → reservation → allocation → pick) with distributed tracing. Sample p95 latency budgets for each hop.
+
+**Metrics** (examples)
+
+* `inventory.onhand_changes.count` (counter)
+* `reservations.created.rate` (rate)
+* `reservations.expired.rate`
+* `inventory.stockouts.count`
+* `read.latency.p95`
+
+**Dashboards & alerts**
+
+* Stockout rate > X% for 15m → page oncall
+* Reservation failure rate > 1% → alert
+* Event lag (consumer offset lag) > threshold → alert
+
+# 9. Testing, QA & contract testing
+
+* Unit & integration tests for each service.
+* Consumer-driven contract testing for event schemas (Pact or Schema registry + schema compatibility tests).
+* End-to-end test environment simulating event streams and WMS callbacks.
+* Chaos testing: simulate network partitions, DB failures, and consumer lag.
+
+# 10. CI/CD, deployment & scaling guidance
+
+* Deploy each service independently (microservice-per-repo or monorepo with independent pipelines).
+* Use blue/green or canary deployments with routing via API Gateway.
+* Autoscale stateless services based on request QPS and CPU; stateful stores scale with partitioning.
+* Database migrations must be backward compatible; use feature flags for rollouts affecting schema.
+
+# 11. Operational runbook (common incidents & playbooks)
+
+**Incident: Reservations failing with 500**
+
+* Check Reservation Service pod logs and DB connectivity.
+* Check Inventory Core health and `inventory.onhand.updated` event backlog.
+* If DB dead, route writes to dead-letter queue and enable read-only fallback. Notify stakeholders.
+
+**Incident: Event consumer lag grows**
+
+* Increase consumer parallelism or partitions.
+* Rebalance consumers and check broker health.
+
+**Incident: Large reconciliation variance for SKU**
+
+* Stop selling SKU (feature flag), create incident, run recounts, review recent movements, apply adjustments with audit log.
+
+# 12. Capacity planning and cost considerations
+
+* Estimate transactions per second (TPS) from peak traffic (checkout QPS × average SKU qty). Size DB/partitions accordingly.
+* Event storage costs: Kafka + archival S3. Retention vs cost tradeoff.
+* Cache layer (Redis) costs vs reduced DB reads — weigh hotspot SKUs.
+
+# 13. Migration & backward compatibility strategy
+
+* Use schema registry for events. Enforce backward compatible changes where consumers may be older.
+* Rolling DB migrations: add new nullable columns, backfill data, then switch code.
+* Provide adapter endpoints for legacy clients.
+
+# Pricing & Promotions Microservices Catalog — Comprehensive
+
+**Purpose:** A complete catalog of microservices and patterns for pricing and promotions in an eCommerce ecosystem. Covers service responsibilities, APIs, events, data ownership, rule engines, caching strategies, consistency models, scaling, security, testing and operational notes so teams can design, build and operate a resilient pricing and promotions platform.
+
+---
+
+## Table of contents
+
+1. Goals & design principles
+2. Service list (summary)
+3. Detailed service definitions
+
+   * responsibilities, API surface, domain events, data owned, storage, SLAs, scaling & caching, failure handling, security, deployment notes
+4. Key flows & orchestration patterns
+5. Pricing & promotion rule patterns and DSL examples
+6. Consistency, caching and performance strategies
+7. Integration patterns (ERP, OMS, checkout, storefront, analytics)
+8. Testing, contract testing & verification
+9. Observability, monitoring & SLOs
+10. Suggested tech stack & infra
+11. Appendix: example domain events, example promotion JSON, sample OpenAPI snippets
+
+---
+
+## 1. Goals & design principles
+
+* **Single responsibility:** each microservice owns a cohesive bounded context (prices, promotions, coupons, eligibility).
+* **Source-of-truth for money:** pricing authoritative records are immutable events + current-state derived view.
+* **Separation of concerns:** pricing data storage, rules evaluation, and runtime resolution are separate to scale independently.
+* **Low-latency resolution:** resolve price and promotions in the checkout path within strict latency budgets (<50–150ms depending on SLO).
+* **Reproducibility & audit:** pricing decisions must be reproducible for refunds/audits — persist inputs and applied rules.
+* **Idempotency & determinism:** rule evaluation should be deterministic given the same inputs; operations must be idempotent.
+* **Experimentation-friendly:** support feature flags/experiments and AB testing for pricing strategies.
+
+---
+
+## 2. Service list (summary)
+
+1. Pricing Core Service (pricing-service)
+2. Price List & Versioning Service (price-list-service)
+3. Price History / Audit Service (price-history-service)
+4. Pricing Rules Engine (pricing-engine)
+5. Promotions Engine (promotions-engine)
+6. Offer / Coupons Service (coupon-service)
+7. Eligibility & Targeting Service (eligibility-service)
+8. Price Resolver & Cache (resolver-service)
+9. Dynamic Pricing & Demand Service (dynamic-pricing-service)
+10. Tax Integration Service (tax-service)
+11. Billing & Chargebacks Connector (billing-connector)
+12. Channel Price Adapter (channel-adapter-service)
+13. Import / Bulk Prices & Promotions Service (import-service)
+14. Experimentation & Feature Flags Service (experiment-service)
+15. Analytics & Revenue Reporting Service (analytics-service)
+16. Fraud & Abuse Detection Service (fraud-service)
+17. Audit & Compliance Service (audit-service)
+18. Promotion Scheduler (scheduler-service)
+19. Admin UI Backing Service (admin-service)
+20. GraphQL/Facade & Aggregation Service (graphql-facade)
+21. Event Bus / Messaging infra (event-bus)
+
+---
+
+## 3. Detailed service definitions
+
+### Pricing Core Service (pricing-service)
+
+**Responsibilities:** Source-of-truth for canonical prices and active price lists per SKU/offer. Manage price records, currency, effective date ranges, and status (active/archived).
+**Primary API:**
+
+* `POST /prices` — create price record
+* `GET /prices?sku={skuId}&currency=GBP&date=2025-08-28` — resolve applicable price(s)
+* `PUT /prices/{priceId}` — update price metadata (not value history)
+* `GET /price-lists/{id}/prices` — list prices in price-list
+  **Events emitted:** `PriceCreated`, `PriceUpdated`, `PriceRetired`, `PriceListPublished`.
+  **Data owned:** price\_id, sku\_id, price\_value (minor units), currency, price\_list\_id, effective\_from, effective\_to, metadata (channel restrictions, customer groups).
+  **Storage:** Relational DB (Postgres) for transactional integrity; store money as integer minor units and use strong types.
+  **SLAs:** admin writes <200ms; availability 99.95% for price retrieval via read model.
+  **Scaling:** horizontally scalable API tier; read replica for high-volume reads. Heavy reads go through resolver-service cache.
+  **Notes:** Implement optimistic concurrency for price edits. Keep price rules out of this service.
+
+---
+
+### Price List & Versioning Service (price-list-service)
+
+**Responsibilities:** Manage named price lists and versions (e.g., retail, wholesale, seasonal lists), staging and publishing.
+**API:** `POST /price-lists`, `POST /price-lists/{id}/publish`, `GET /price-lists/{id}/versions`.
+**Events:** `PriceListCreated`, `PriceListVersionPublished`.
+**Notes:** Published price-list version is referenced by pricing-service for lookup. Use snapshots for reproducibility.
+
+---
+
+### Price History / Audit Service (price-history-service)
+
+**Responsibilities:** Immutable log of price changes for audit, rollbacks, and reconciliation.
+**API:** `GET /history?sku={skuId}`, `POST /history/query`.
+**Storage:** Append-only event store (Kafka compacted topics or event store DB). Long term storage + archival.
+**Notes:** Keep links to actorId, change reason, and correlation IDs for traceability.
+
+---
+
+### Pricing Rules Engine (pricing-engine)
+
+**Responsibilities:** Evaluate rule-based price adjustments (promotional overrides, bundle pricing, customer-specific adjustments, rounding, tax-exclusive/inclusive transformations). Provides both batch and runtime evaluation modes.
+**API:**
+
+* `POST /evaluate` — input: context (sku, basePrice, customer, channel, cart) → returns: adjusted price + applied rule metadata
+* `POST /simulate` — simulate a scenario for forecasts
+* `POST /rules` — create/update rules (admin)
+  **Events:** `RuleCreated`, `RuleUpdated`, `RuleDeactivated`.
+  **Notes:** Engine accepts a rules DSL or JSON-based decision tables. Must be sandboxed for safe execution; use versioned rule sets and rule activation windows.
+
+---
+
+### Promotions Engine (promotions-engine)
+
+**Responsibilities:** Manage promotions lifecycle (create, schedule, eligibility, stacking rules), evaluate promotions for a given cart or SKU set and return applicable offers with priority and stacking information.
+**API:**
+
+* `POST /promotions` — create promotion
+* `POST /promotions/evaluate` — evaluate promotions for a cart or single SKU
+* `GET /promotions/active?channel=web` — list active promotions
+  **Events:** `PromotionCreated`, `PromotionScheduled`, `PromotionExpired`, `PromotionStateChanged`.
+  **Data owned:** promotion\_id, rules, priority, stacking policy, target segments, redemption limits.
+  **Notes:** Distinguish between `promotions-engine` (business promotion definitions) and `coupon-service` (redemption & unique codes).
+
+---
+
+### Offer / Coupons Service (coupon-service)
+
+**Responsibilities:** Manage coupon codes, unique vouchers, redemption limits, usage tracking, and issuance (single use vs multi-use).
+**API:** `POST /coupons`, `POST /coupons/redeem`, `GET /coupons/{code}/status`.
+**Events:** `CouponIssued`, `CouponRedeemed`, `CouponExpired`.
+**Storage:** Strongly consistent DB (for concurrency on redemption). Use optimistic/pessimistic locks or atomic DB operations for usage counters.
+
+---
+
+### Eligibility & Targeting Service (eligibility-service)
+
+**Responsibilities:** Evaluate whether an entity (customer, account, segment, geolocation) is eligible for a promotion, price list, or offer. Exposes audience segmentation and membership.
+**API:** `POST /eligible?promotionId=`, `POST /segments/evaluate`.
+**Events:** `SegmentUpdated`.
+**Notes:** Integrate with CRM / customer-service to retrieve customer attributes; cache segment membership for low-latency checks.
+
+---
+
+### Price Resolver & Cache (resolver-service)
+
+**Responsibilities:** High-performance read model that resolves final prices for SKUs (base price + promotions + dynamic adjustments + taxes). Provides TTL-based cache and ability to pre-warm or push invalidations.
+**API:** `POST /resolve` (batch or single), `GET /resolve?sku=...&customer=...`.
+**Data owned:** denormalized resolved price view per (sku, priceList, customerSegment, channel)
+**Storage & cache:** Redis / in-memory cache + CDN for publicly safe content. Support cache invalidation channels and event-driven refresh.
+**SLAs:** P99 <100ms; critical for checkout.
+
+---
+
+### Dynamic Pricing & Demand Service (dynamic-pricing-service)
+
+**Responsibilities:** ML-driven or rules-driven dynamic pricing: price elasticity models, competitor-based repricing, surge pricing, floor/ceiling enforcement.
+**API:** `POST /suggest?sku=...&context=...`, `POST /apply-suggested`.
+**Events:** `DynamicPriceSuggested`, `DynamicPriceApplied`.
+**Notes:** Must enforce guardrails (min/max price), approval workflows, and experiment flags. Keep human-in-the-loop for high-risk categories.
+
+---
+
+### Tax Integration Service (tax-service)
+
+**Responsibilities:** Compute tax for a resolved price in a given jurisdiction or integrate with external tax providers (Avalara, TaxJar). Return tax-inclusive and tax-exclusive amounts.
+**API:** `POST /calculate-tax` (cart-level / line-level).
+**Notes:** Keep stateless; cache tax rates with expiry. Persist tax decisions used in invoices.
+
+---
+
+### Billing & Chargebacks Connector (billing-connector)
+
+**Responsibilities:** Push final charges for invoicing and financial reconciliation; integrate with billing system. Store mapping between price decisions and billing records.
+**API:** `POST /charges`, `GET /charges/{id}`.
+
+---
+
+### Channel Price Adapter (channel-adapter-service)
+
+**Responsibilities:** Transform canonical price payloads to channel-specific formats and push channel-specific price updates (e.g., mobile app cache, marketplace feeds).
+**API:** `POST /push?channel=mobile`, `GET /channel/status`.
+
+---
+
+### Import / Bulk Prices & Promotions Service (import-service)
+
+**Responsibilities:** Bulk upload of price lists and promotion definitions (CSV/Excel/API), validation, dry-run, dry-run reporting, and import jobs.
+**API:** `POST /imports/prices`, `POST /imports/promotions`, `GET /imports/{jobId}/status`.
+**Notes:** Use worker fleet, idempotent upsert semantics, and create audit events for all changes.
+
+---
+
+### Experimentation & Feature Flags Service (experiment-service)
+
+**Responsibilities:** Manage experiments for pricing strategies (A/B testing), feature flags for rule activation per segment, and metric collection hooks.
+**API:** `POST /experiments`, `POST /evaluate?experimentId=`.
+**Notes:** Integrate with analytics-service to capture revenue delta.
+
+---
+
+### Analytics & Revenue Reporting Service (analytics-service)
+
+**Responsibilities:** Aggregate pricing decisions, promotion redemptions, revenue uplift from experiments, and dashboards for finance and merchandising.
+**API:** `GET /reports/revenue-by-promotion`, `GET /reports/price-change-impact`.
+**Data sources:** events from price-history, promotions-engine, coupon-service, resolver-service.
+
+---
+
+### Fraud & Abuse Detection Service (fraud-service)
+
+**Responsibilities:** Detect coupon abuse, suspicious mass-redemptions, and apply throttle/blacklists. Integrates with coupon-service for blocking.
+**API:** `POST /check-fraud`, `POST /block`.
+
+---
+
+### Audit & Compliance Service (audit-service)
+
+**Responsibilities:** Immutable logs of price decisions and applied promotions (for refunds and legal compliance). Links to price-history.
+**API:** `GET /audit?transactionId=`, `GET /audit?entity=sku&entityId=`.
+
+---
+
+## 4. Key flows & orchestration patterns
+
+### Price lookup (runtime path)
+
+1. Client requests resolved price for sku/customer/channel.
+2. Gateway → resolver-service (fast path).
+3. resolver-service checks local cache (Redis) keyed by (sku, priceListVersion, customerSegment, channel, date).
+4. Cache miss → resolver composes data: fetch base price from pricing-service read replica, query promotions-engine for eligible promotions (or use precomputed promotion-augmented view), check eligibility-service, optionally call tax-service, then compute final price via pricing-engine.
+5. Persist resolution details (applied rules, timestamps) to audit-service and return to client.
+6. Cache the result with TTL and subscribe to invalidation events for price or promotion changes.
+
+### Promotion evaluation at checkout
+
+1. Cart submission → promotions-engine.evaluate(cart, customerContext) → returns list of applicable promotions and computed discounts with reason and priority.
+2. Cart service applies best combination based on stacking rules and business thresholds (e.g., max one coupon per order).
+3. Coupons are validated via coupon-service redeem path (atomic redemption reserved until checkout completes).
+4. Final price resolution includes taxes via tax-service.
+5. All evaluation inputs and outputs appended to audit-service.
+
+### Price change propagation
+
+1. Merch ops updates price-list or publishes new price-list version in price-list-service.
+2. pricing-service emits `PriceListVersionPublished` event and `PriceUpdated` events per SKU (or compacted summary for large imports).
+3. resolver-service, channel-adapter-service, and search-index-service consume events to refresh caches and push updates to channels.
+4. analytics-service ingests events to compute uplift and monitor anomalies.
+
+### Dynamic pricing feedback loop
+
+1. dynamic-pricing-service suggests price changes using ML model.
+2. Suggested changes go to approval workflow (admin-service or experiment-service) before application.
+3. Upon approval, `DynamicPriceApplied` events are emitted and historicized.
+4. analytics-service measures impact and feeds data back to model training pipelines.
+
+---
+
+## 5. Pricing & promotion rule patterns and DSL examples
+
+* **Static rule:** apply X% discount when SKU in category A between dates D1–D2.
+* **Threshold rule:** apply fixed discount when order subtotal > £100.
+* **Buy X get Y:** buy two shirts get third at 50%.
+* **Customer-segment rule:** 10% off for loyalty tier Gold.
+* **Stacking rules:** exclusive vs combinable policies.
+
+### Example DSL (JSON-based) - simple promotion
+
+```json
+{
+  "id": "promo-2025-summer",
+  "name": "Summer Sale 2025",
+  "priority": 100,
+  "validFrom": "2025-06-01T00:00:00Z",
+  "validTo": "2025-06-30T23:59:59Z",
+  "conditions": {
+    "all": [
+      { "type": "category_in", "categoryId": "cat-111" },
+      { "type": "channel_is", "channel": "web" }
+    ]
+  },
+  "actions": [
+    { "type": "percentage_discount", "value": 20 }
+  ],
+  "stacking": "combinable"
+}
+```
+
+### Example pricing-rule snippet (for pricing-engine)
+
+```json
+{
+  "ruleId": "price-rounding-standard",
+  "when": { "always": true },
+  "apply": [
+    { "type": "round", "strategy": "nearest", "precision": 0.05 }
+  ]
+}
+```
+
+---
+
+## 6. Consistency, caching and performance strategies
+
+* **CQRS + Event-driven read models:** pricing-service writes -> events -> resolver-service read models and caches.
+* **Cache key design:** include all variables that affect price (priceListVersion, customerSegment, channel, currency, date, promotionsSnapshotId).
+* **Invalidation strategy:** event-driven invalidation + push-based cache refresh for hot SKUs. Avoid long TTLs for volatile SKUs.
+* **Bulk invalidations:** support mass-purge endpoints for large price-list publishes.
+* **Compaction & snapshots:** when importing large price lists, publish compacted summary events instead of millions of discrete events; consumers can fetch snapshot.
+* **Deterministic evaluation & replay:** store rule-set version and inputs used in each decision to allow exact replay.
+
+---
+
+## 7. Integration patterns
+
+* **ERP (master price sync):** connectors push base cost and recommended retail price; map ERP price lists to internal price-list versions.
+* **OMS / Checkout:** connector validates final price and built-in anti-tamper checks (digital signature or HMAC of resolution payload) before accepting orders.
+* **Marketplace / Channel feeds:** channel-adapter produces per-channel feeds and throttles publishing.
+* **Tax provider:** tax-service acts as thin adapter to external tax providers with caching.
+
+---
+
+## 8. Testing, contract testing & verification
+
+* Unit tests for rule parsing and evaluation.
+* Property tests for money arithmetic and rounding.
+* Contract tests (Pact) between promotions-engine and coupon-service, pricing-service and resolver-service.
+* Deterministic integration tests that run rule sets against golden datasets.
+* Chaos and load tests on resolver-service to meet latency SLOs.
+
+---
+
+## 9. Observability, monitoring & SLOs
+
+* **Metrics:** price resolution latency (P50/P95/P99), promotions evaluation latency, cache hit ratio, coupon redemption latency, event lag, number of rule evaluations per second.
+* **Traces:** OpenTelemetry traces from storefront through resolver → promotions → coupon redemption → tax.
+* **Alerts:** sudden revenue drop, promotion mis-application rates, cache invalidation backlog.
+* **SLO examples:** resolver P99 < 100ms; coupon redemption success rate > 99.9%; promotion evaluation P95 < 150ms.
+
+---
+
+# Shopping Cart & Session Microservices Catalog
+
+*Comprehensive catalog of microservices, APIs, events, data models, integration patterns, non-functional requirements, operational runbooks, and deployment guidance for a Shopping Cart and Session platform in eCommerce.*
+
+---
+
+## Table of Contents
+
+1. Overview & Goals
+2. High-level domain model
+3. Microservice catalog (detailed)
+
+   * 3.1 Cart Service (Core)
+   * 3.2 Session Service (User Session Manager)
+   * 3.3 Cart Read Model / Availability API
+   * 3.4 Cart Merge & Identity Service
+   * 3.5 Pricing & Promotions Service
+   * 3.6 Coupon & Discount Service
+   * 3.7 Checkout Orchestrator / Order Initiator
+   * 3.8 Abandoned Cart & Recovery Service
+   * 3.9 Analytics & Events Exporter
+   * 3.10 Bulk Import / Migration Service
+   * 3.11 Audit & Compliance Service
+   * 3.12 Telemetry & Metrics Aggregator
+4. Cross-cutting patterns & architecture
+
+   * API Gateway & BFF
+   * Storage choices & sharding
+   * Consistency, transactions & sagas
+   * Caching & CQRS
+   * Eventing & streaming
+   * Idempotency & retries
+   * Security & privacy
+5. Canonical data models
+6. API design guidelines & examples (REST + events)
+7. Events catalogue (topics, schemas, retention suggestions)
+8. Observability, monitoring & alerting
+9. Testing, QA & contract testing
+10. CI/CD, deployment & scaling guidance
+11. Operational runbook (common incidents & playbooks)
+12. Capacity planning and cost considerations
+13. Migration & backward compatibility strategy
+14. Appendix: sample OpenAPI snippets, sample event schemas
+
+---
+
+# 1. Overview & Goals
+
+**Mission:** Provide a resilient, low-latency, secure, and flexible shopping cart and session platform that supports guest and authenticated users, multiple channels (web, mobile, API), promotions and pricing rules, cart persistence and merge on login, and a strong telemetry+recovery story (e.g., abandoned carts).
+
+**Key non-functional goals:**
+
+* Extremely low latency for add/update/remove cart operations (target p95 < 50ms for reads, <150ms for writes under typical load)
+* Availability: 99.95% for reads, 99.9% for transactional writes
+* Correctness: avoid accidental item duplication, support idempotency for mutating operations
+* Scalability: horizontally scalable to handle traffic spikes (Black Friday)
+* Privacy and compliance: support GDPR/CCPA deletion requests and session retention policies
+* Observability: full traceability of user/cart lifecycle
+
+# 2. High-level domain model
+
+Primary entities:
+
+* **Session** — ephemeral user session (guest or authenticated) with metadata (sessionId, userId if logged in, device, lastActivity)
+* **Cart** — container of cart items tied to a sessionId or userId (cartId may be same as sessionId or separate)
+* **CartItem** — {skuId, quantity, priceSnapshot, metadata: selectedOptions, bundleId, warnings}
+* **PriceSnapshot** — price, currency, taxes, timestamp — captured at add time or when pricing recalculated
+* **PromotionApplication** — applied promotions or coupons with computed discounts
+* **CartReservation** — optional holds for inventory when needed (delegated to Inventory Service)
+* **CartEvent** — stream of cart changes (add/remove/update/merge)
+
+# 3. Microservice catalog (detailed)
+
+> Each microservice includes responsibilities, API contract (key endpoints), event contracts, storage model, partitioning key, consistency model, typical SLAs, scaling strategy, and failure modes & compensations.
+
+---
+
+## 3.1 Cart Service (Core)
+
+**Responsibilities**
+
+* Create/read/update/delete carts and cart items (CRUD operations)
+* Maintain cart semantics: add item, update quantity, remove item, apply promotion, capture price snapshots
+* Provide concurrency control for simultaneous updates from multiple devices (optimistic locking / merge semantics)
+* Expose synchronous APIs for storefronts and asynchronous events for downstream systems
+* Provide features: TTL for guest carts, persistent carts for logged-in users, cart locking during checkout
+
+**APIs (examples)**
+
+* `POST /carts` → create cart (returns cartId, sessionId)
+* `GET /carts/{cartId}` → cart snapshot
+* `POST /carts/{cartId}/items` → add item
+* `PUT /carts/{cartId}/items/{lineItemId}` → update quantity/options
+* `DELETE /carts/{cartId}/items/{lineItemId}` → remove item
+* `POST /carts/{cartId}/apply-promo` → apply coupon/promotions
+* `POST /carts/{cartId}/lock` and `/unlock` → prevent writes during checkout
+* `POST /carts/{cartId}/checkout` → handoff to Checkout Orchestrator (or create `checkout.session`)
+
+**Example add-item payload**
+
+```json
+{
+  "idempotencyKey": "uuid-...",
+  "skuId": "SKU-123",
+  "quantity": 2,
+  "unitOptions": { "size":"M","color":"red" },
+  "priceOverride": null,
+  "metadata": { "source":"web" }
+}
+```
+
+**Storage**
+
+* Primary: fast, low-latency datastore. Options:
+
+  * Redis (for hot carts) with snapshotting to durable store
+  * DynamoDB / Cassandra for highly-scalable persistent store
+  * Postgres for transactional integrity if smaller scale
+* Recommended pattern: write-through cache + durable store for persistence and replayability.
+
+**Partition key**: `cartId` or `sessionId`.
+
+**Consistency**
+
+* Use optimistic concurrency control with `version`/`etag` for HTTP conditional updates.
+* For high-value operations (inventory reservations) coordinate via sagas.
+
+**Scaling**
+
+* Stateless API tier horizontally scaled. Stateful store scaled via partitions.
+* Cache hot carts in Redis cluster with eviction based on TTL and recency.
+
+**Failures & compensation**
+
+* Concurrent updates causing lost updates — return `409 CONFLICT` with latest snapshot; client should merge.
+* If persistent store fails, persist deltas to a write-ahead queue for replay.
+
+**SLA**: 99.95% availability for reads, 99.9% for writes.
+
+---
+
+## 3.2 Session Service (User Session Manager)
+
+**Responsibilities**
+
+* Issue and manage session identifiers (sessionId), both for guests and authenticated users
+* Map session ↔ user identity when users log in or out; support session merge/auth flow
+* Keep session metadata: device, browser fingerprint, lastActivity, TTL, consent flags
+* Support secure session cookies, token issuance (JWT or reference tokens), and session invalidation
+* Provide session introspection and session revocation for security/administration
+
+**APIs**
+
+* `POST /sessions` → create session (guest) (returns sessionId, cookie headers)
+* `GET /sessions/{sessionId}` → session metadata
+* `POST /sessions/{sessionId}/associate-user` → attach userId after login
+* `POST /sessions/{sessionId}/merge` → merge session carts (delegated to Cart Merge Service)
+* `DELETE /sessions/{sessionId}` → end session
+* `POST /sessions/{sessionId}/refresh` → extend TTL
+
+**Tokens & cookies**
+
+* Issue short-lived access tokens and long-lived secure session cookie (HttpOnly, Secure, SameSite). For API clients, issue access/refresh tokens.
+* Use reference tokens stored server-side to avoid storing user session data in JWT payloads unless signed and minimal.
+
+**Storage**
+
+* Session metadata in Redis (fast TTL semantics). Durable backups to DB for audit/logging.
+
+**Security**
+
+* Rate-limit session creation to prevent abuse; fingerprint sessions to detect hijacking.
+* Multi-Factor Authentication triggers stored in session context during checkout for high-value orders.
+
+**Failure modes**
+
+* Session store outage: degrade to stateless JWT-only fallback for read-only flows but block critical operations requiring server-side session checks.
+
+---
+
+## 3.3 Cart Read Model / Availability API
+
+**Responsibilities**
+
+* Serve denormalized cart views optimized for storefronts (cart totals, applied promotions, availability hints)
+* Materialize combined data: cart items + price snapshots + availability indicators + promotions
+* Provide bulk endpoints to query multiple carts or multiple SKUs across carts (for analytics or checkout flows)
+
+**APIs**
+
+* `GET /read/carts/{cartId}` → denormalized view
+* `GET /read/carts?sessionIds=...` → bulk
+
+**Implementation**
+
+* Built from cart and pricing events (event-driven projections) into a read-optimized store (Redis, ElasticSearch or Postgres read replica)
+* Eventual consistency: document expected staleness in API (e.g., `lastUpdated` timestamp)
+
+---
+
+## 3.4 Cart Merge & Identity Service
+
+**Responsibilities**
+
+* Responsible for merging cart state when a guest logs in (merge guest cart into user cart)
+* Define merge strategies and conflict resolution (sum quantities, prefer latest, ask user for choices)
+* Handle duplicate items, price snapshot reconciliation and promotion re-evaluation after merge
+
+**APIs**
+
+* `POST /merge` { guestCartId, userCartId, strategy }
+* `GET /merge/{id}/preview` → preview merged cart before applying
+
+**Merge strategies**
+
+* **Sum**: add quantities for identical items
+* **PreferAuth**: use authenticated cart and discard guest items unless not present
+* **Preview**: produce preview and let user accept
+
+**Failure modes**
+
+* Promotion invalidation on merge (coupon used by guest) — present warnings and re-evaluate prices.
+
+---
+
+## 3.5 Pricing & Promotions Service
+
+**Responsibilities**
+
+* Compute unit prices, taxes, and apply promotion rules to cart snapshots
+* Maintain promotion rules engine (stackable rules, priority, mutual-exclusion), pricing tiers, and regional pricing
+* Expose pricing evaluation APIs to Cart Service and Checkout
+
+**APIs**
+
+* `POST /pricing/evaluate` { cartSnapshot, context: {country, currency, customerTier} }
+* `POST /promotions/evaluate` { cartSnapshot }
+* Admin APIs to create/update promotions
+
+**Design notes**
+
+* Separation between price calculation and promotion rule evaluation helps scale and testability
+* Use a rule engine (Drools, custom DSL, or serverless functions) for complex promotions
+
+**Caching**
+
+* Cache price evaluation results for short TTL keyed by cart hash + context to avoid repeated compute
+
+**Failure modes**
+
+* Promotion rule misconfiguration → incorrect discounts. Provide dry-run and simulator in staging.
+
+---
+
+## 3.6 Coupon & Discount Service
+
+**Responsibilities**
+
+* Manage coupon lifecycle, validation, usage counts, one-time use enforcement
+* Enforce coupon-scoped constraints (per-user, per-order, start/end, stackable with other promos)
+
+**APIs**
+
+* `POST /coupons/validate` { couponCode, cartSnapshot, userId }
+* `POST /coupons/redeem` { couponCode, orderId }
+* `POST /coupons/release` { couponCode, orderId } (on order cancellation)
+
+**Consistency**
+
+* Use strong consistency or transactional store to enforce one-time coupons. Alternatively, use reservation tokens.
+
+---
+
+## 3.7 Checkout Orchestrator / Order Initiator
+
+**Responsibilities**
+
+* Orchestrate checkout handoff: lock cart, validate prices, reserve inventory, collect payment, create order
+* Implement saga to coordinate cross-service steps and rollback on failure
+* Enforce idempotency for `checkout` operations to avoid duplicate orders
+
+**APIs**
+
+* `POST /checkout/start` { cartId, paymentMethodId, shippingAddress } → `checkoutId` (async)
+* `GET /checkout/{checkoutId}/status`
+
+**Saga steps example**
+
+1. Lock cart (Cart Service)
+2. Re-evaluate pricing (Pricing Service)
+3. Reserve inventory (Inventory Reservation Service)
+4. Authorize payment (Payment Service)
+5. Create order (Order Service)
+6. On success: commit reservations and release locks; on failure: rollback reservations, unlock cart
+
+**Failure modes**
+
+* Partial failure mid-saga (e.g., payment failed after inventory reserved) — orchestrator must trigger compensations and emit `checkout.failed` with reason.
+
+---
+
+## 3.8 Abandoned Cart & Recovery Service
+
+**Responsibilities**
+
+* Detect abandoned carts using session lastActivity and business rules (e.g., 30m cart inactivity)
+* Create recovery workflows: email/SMS/push reminders, in-app prompts, and personalized offers
+* Track engagement and conversions from recovery campaigns
+
+**APIs**
+
+* `POST /abandoned-carts/schedule` (internal)
+* `GET /abandoned-carts/{id}/preview`
+
+**Integration**
+
+* Work with Marketing Automation to send messages and capture clicks
+* Apply throttling policies to avoid spamming users
+
+**Failure modes**
+
+* Overly aggressive detection → false positives; tune thresholds and A/B test recovery messaging.
+
+---
+
+## 3.9 Analytics & Events Exporter
+
+**Responsibilities**
+
+* Export cart and session events to analytics pipelines (data warehouse, streaming analytics)
+* Enrich events with user/marketing context (utm, campaign ids)
+
+**APIs / Integrations**
+
+* Stream events to Kafka or Kinesis
+* Batch ETL to warehouse (BigQuery/Snowflake)
+
+**Considerations**
+
+* Ensure PII handling rules applied before exporting; pseudonymize user identifiers unless consented.
+
+---
+
+## 3.10 Bulk Import / Migration Service
+
+**Responsibilities**
+
+* Migrate legacy carts, perform bulk merges, or import saved carts from other systems
+* Provide dry-run validation and idempotent import semantics
+
+**APIs**
+
+* `POST /bulk/imports` upload file
+* `GET /bulk/imports/{id}/status`
+
+---
+
+## 3.11 Audit & Compliance Service
+
+**Responsibilities**
+
+* Immutable audit log of cart operations, session creation and destruction, and promotions redemptions
+* Support queries for regulatory & financial audits
+
+**Storage**
+
+* WORM or append-only store; sign event hashes if required for non-repudiation
+
+---
+
+## 3.12 Telemetry & Metrics Aggregator
+
+**Responsibilities**
+
+* Collect metrics (add-to-cart rate, cart abandonment rate, conversion from cart to order, average cart value)
+* Expose dashboards and alerts
+
+**Metrics examples**
+
+* `cart.add.rate` (per minute), `cart.abandonment.rate`, `cart.checkout.success.rate`, `avg_cart_value`
+
+---
+
+# 4. Cross-cutting patterns & architecture
+
+## API Gateway & BFF
+
+* Use API Gateway to enforce auth, rate limits, and TLS. Provide BFFs for web/mobile with aggregated endpoints (e.g., bulk fetch of cart + inventory availability).
+
+## Storage choices & sharding
+
+* Hot, ephemeral data: Redis Cluster with AOF/RDB for persistence
+* Durable persistence: DynamoDB/Cassandra/Postgres depending on scale
+* Shard by `cartId` or `userId` (if tied to user). For large multi-tenant systems consider tenantId sharding.
+
+## Consistency, transactions & sagas
+
+* Use local transactions within a service.
+* Use sagas for cross-service operations (checkout). For simple flows, prefer choreography (event-driven); for complex error handling, prefer orchestrator.
+
+## Caching & CQRS
+
+* Maintain a read-side materialized view for fast cart retrieval.
+* Publish events for every cart mutation for projections.
+
+## Eventing & streaming
+
+* Central event bus (Kafka) with topics: `cart.events`, `session.events`, `pricing.events`, `checkout.events`.
+* Use schema registry and consumer-driven contracts.
+
+## Idempotency & retries
+
+* All mutating operations must accept `idempotencyKey` and persist it with outcome for TTL (e.g., 7 days)
+* Use exponential backoff with jitter for transient failures
+
+## Security & privacy
+
+* Enforce CSRF protection for cookie flows. Use `SameSite` cookie attributes.
+* Allow users to request cart data export or deletion (GDPR) — pipeline to remove PII and optionally anonymize cart data in analytics.
+
+# 5. Canonical data models
+
+**Session**
+
+```json
+{
+  "sessionId": "sess-uuid",
+  "userId": "user-uuid|null",
+  "createdAt": "2025-08-01T12:00:00Z",
+  "lastActivityAt": "2025-08-01T12:25:00Z",
+  "deviceInfo": { "ua":"...","ip":"..." },
+  "ttlSeconds": 2592000,
+  "consent": { "email": true, "analytics": false }
+}
+```
+
+**Cart**
+
+```json
+{
+  "cartId": "cart-uuid",
+  "sessionId": "sess-uuid",
+  "userId": "user-uuid|null",
+  "status": "open|locked|checked_out|abandoned",
+  "items": [
+    {
+      "lineItemId": "line-1",
+      "skuId": "SKU-123",
+      "quantity": 2,
+      "priceSnapshot": { "unitPrice": 9.99, "currency": "GBP", "tax": 0.2 },
+      "metadata": {}
+    }
+  ],
+  "appliedPromotions": [],
+  "total": 19.98,
+  "lastUpdated": "2025-08-01T12:25:00Z",
+  "version": 12
+}
+```
+
+**CartEvent (example)**
+
+```json
+{
+  "eventId": "evt-uuid",
+  "cartId": "cart-uuid",
+  "type": "item.added",
+  "payload": { "lineItemId":"line-1","skuId":"SKU-123","quantity":2 },
+  "causationId": "req-uuid",
+  "timestamp": "2025-08-01T12:25:05Z"
+}
+```
+
+# 6. API design guidelines & examples (REST + events)
+
+* Use semantic HTTP codes. Return `202 Accepted` for async operations with `Location` header.
+* Include `idempotencyKey` header for mutating calls.
+* Provide `If-Match` / `ETag` for optimistic updates.
+* Support bulk endpoints for add/update/remove with per-item results.
+* Document consistency/latency expectations for read models.
+
+**Example REST: Add to cart**
+`POST /carts/{cartId}/items`
+Headers: `Idempotency-Key: uuid-...`
+Body: see earlier sample.
+Response:
+
+* `201 Created` with updated cart snapshot or `202 Accepted` if processing async.
+
+# 7. Events catalogue (topics, schemas, retention suggestions)
+
+* `session.created` — { sessionId, userId?, device, createdAt }
+* `session.associated` — { sessionId, userId }
+* `cart.created`, `cart.updated`, `cart.deleted`
+* `cart.item.added`, `cart.item.updated`, `cart.item.removed`
+* `cart.merged` — { fromCartId, toCartId, strategy }
+* `cart.abandoned`, `cart.recovered`
+* `promotion.applied`, `promotion.removed`, `coupon.redeemed`, `coupon.released`
+* `checkout.started`, `checkout.completed`, `checkout.failed`
+
+**Retention**: keep hot events 7–14 days in Kafka for replay; archive to S3/warehouse for 1–3 years depending on analytics and compliance needs. Anonymize user identifiers as required before long-term storage.
+
+# 8. Observability, monitoring & alerting
+
+**Logs**
+
+* Structured logs with `traceId`, `sessionId`, `cartId`, `userId`, `service`, `level`, `msg`.
+
+**Traces**
+
+* Instrument user flows: add-to-cart → pricing → inventory check → checkout.
+
+**Metrics & Alerts**
+
+* `cart.add.latency.p95`, `cart.checkout.error.rate`, `session.create.rate`, `cart.abandonment.rate`.
+* Alerts:
+
+  * Checkout failure rate > 1% for 10m → page oncall
+  * Consumer lag > threshold → alert
+  * Elevated cart abandonment spike → inform product/marketing
+
+# 9. Testing, QA & contract testing
+
+* Unit tests for business rules (merge, pricing)
+* Contract tests for events (producer & consumer contracts)
+* End-to-end tests using staging environment with mocked payment and inventory
+* Load tests simulating peak traffic; chaos testing for network partitions
+
+# 10. CI/CD, deployment & scaling guidance
+
+* Independent pipelines per microservice, automated canary/circuit-breaker rollout
+* Feature flags for new promotions/pricing logic
+* Auto-scale stateless pods; stateful stores scaled via partitioning
+* Database schema migrations: nonblocking, add nullable columns first, backfill
+
+# 11. Operational runbook (common incidents & playbooks)
+
+**Incident: Cart writes failing with 500**
+
+* Check Cart Service pods and DB connectivity
+* Check Redis cluster (AOF/RDB status), eviction metrics
+* Check idempotency store errors causing duplication
+* Temporarily switch to read-only mode for storefront; enable queueing for writes
+
+**Incident: Abandoned cart notification spike**
+
+* Check scheduler job for misconfiguration (frequency threshold)
+* Rollback messaging rules if misconfigured; notify marketing
+
+**Incident: Cart merge duplication**
+
+* Identify offending mergeId, run reconciliation, and create compensating event to remove duplicates; update merge logic
+
+# 12. Capacity planning and cost considerations
+
+* Estimate add-to-cart QPS from peak traffic and size Redis cluster accordingly
+* Consider cost of persistent store (DynamoDB vs Postgres) vs operational overhead
+* Event streaming cost (Kafka + archival) vs analytical needs
+
+# 13. Migration & backward compatibility strategy
+
+* Maintain schema registry and backward-compatible event changes
+* Support versioned APIs and deprecation plan
+* For session model changes, implement dual-write during migration and backfill read models
+
+# Checkout & Order Management Microservices Catalog — Comprehensive
+
+**Purpose:** Provide a detailed, practical microservice catalog for Checkout and Order Management (OMS) in eCommerce. This document outlines services, bounded contexts, API examples, domain events, data ownership, transactional patterns (sagas), inventory/reservation strategies, fulfillment orchestration, refunds, returns, and operational guidance so teams can design, implement, and operate a resilient, auditable checkout & order platform.
+
+---
+
+## Table of contents
+
+1. Goals & design principles
+2. Service list (summary)
+3. Detailed service definitions
+
+   * responsibilities, API surface, domain events, data owned, storage, SLAs, scaling & caching, failure handling, security, deployment notes
+4. Key flows & sagas
+
+   * Checkout → Order Placement
+   * Payment capture & settlement
+   * Reservation, fulfillment, partial shipments
+   * Cancellation & refund
+   * Returns & RMA
+5. Data ownership and consistency patterns
+6. Integrations & adapters (Payments, Carriers, Warehouses, ERP)
+7. Pricing, promotions & taxes interactions
+8. Idempotency, retries & error handling
+9. Observability, monitoring & SLOs
+10. Testing, contract testing & audits
+11. Security & compliance
+12. Suggested tech stack & infra
+13. Appendix: example domain events & OpenAPI snippets
+
+---
+
+## 1. Goals & design principles
+
+* **Single responsibility & bounded contexts:** Separate cart/checkout, order lifecycle, payment, fulfillment, and returns into clear domains.
+* **Event-driven & saga-based orchestration:** Use events for eventual consistency, sagas for long-running transactions (order processing) and compensations.
+* **Idempotency & auditability:** All commands are idempotent; all decisions are logged for audit and reconciliation.
+* **Low-latency checkout:** Checkout and price resolution must be fast (<100ms P95 for critical path), delegating heavy processing to async flows.
+* **Resilience & recoverability:** System must handle payment failures, carrier delays, and partial fulfillments gracefully.
+* **Security & compliance:** PCI scope minimized (use tokenized payment flows), PII protection, secure logs for audits.
+
+---
+
+## 2. Service list (summary)
+
+1. Cart Service (cart-service)
+2. Checkout Orchestrator (checkout-service)
+3. Order Service / Order Store (order-service)
+4. Payment Service (payment-service)
+5. Payment Gateway Adapter (payment-adapter)
+6. Reservation & Inventory Locking Service (reservation-service)
+7. Fulfillment Orchestrator (fulfillment-service)
+8. Warehouse / WMS Connector (wms-adapter)
+9. Shipping & Carrier Service (shipping-service)
+10. Tax Service (tax-service)
+11. Promotions & Pricing Adapter (pricing-adapter)
+12. Fraud Detection Service (fraud-service)
+13. Notification Service (notification-service)
+14. Returns & RMA Service (returns-service)
+15. Refunds & Chargeback Service (refund-service)
+16. Accounting / Invoicing Service (billing-service)
+17. Order History & Audit Service (audit-service)
+18. Customer Order Portal Backend (customer-orders-service)
+19. Analytics & Reporting Service (analytics-service)
+20. Saga Orchestrator / Workflow Engine (saga-orchestrator)
+21. Event Bus / Messaging Infrastructure (event-bus)
+22. API Gateway / Facade (api-gateway)
+23. Admin & Order Management UI Backend (admin-order-service)
+24. Contract & Connector Service (connector-service)
+
+---
+
+## 3. Detailed service definitions
+
+### Cart Service (cart-service)
+
+**Responsibilities:** Lightweight, ephemeral or persisted user cart; item lines, quantities, selected offers, promotions applied, coupons, session context, and price estimates.
+**APIs:** `POST /carts`, `GET /carts/{cartId}`, `PUT /carts/{cartId}/lines`, `POST /carts/{cartId}/apply-coupon`.
+**Events emitted:** `CartCreated`, `CartUpdated`, `CartAbandoned`.
+**Data owned:** cart\_id, customer\_id (optional), lines, promo\_applied, last\_modified.
+**Storage:** Redis for session-heavy workloads; optional persisted store (Postgres) for long-lived carts and analytics.
+**Notes:** Do not store payment instruments here; tokenized payment methods via payment-service.
+
+---
+
+### Checkout Orchestrator (checkout-service)
+
+**Responsibilities:** Orchestrates checkout flow: validation, price resolution, tax, shipping options, fraud check, payment authorization, and initiates order placement saga. Responsible for synchronous user-facing steps.
+**APIs:** `POST /checkout` (input: cartId, shippingAddress, paymentMethodToken, customerContext) → returns `checkoutSessionId` and resolution summary; `POST /checkout/{sessionId}/confirm` to place order.
+**Events emitted/consumed:** consumes `CartUpdated`, emits `CheckoutInitiated`, `CheckoutFailed`, `CheckoutConfirmed`.
+**Notes:** Keep critical path minimal and fast. Delegates heavy work to async order-service/saga.
+
+---
+
+### Order Service / Order Store (order-service)
+
+**Responsibilities:** Source-of-truth for orders and order lifecycle. Stores authoritative order state, captures order lines, shipments, payments, events, and audit metadata.
+**APIs:** `POST /orders` (idempotent create), `GET /orders/{orderId}`, `PATCH /orders/{orderId}/status`.
+**Events emitted:** `OrderCreated`, `OrderConfirmed`, `OrderCancelled`, `OrderCompleted`, `OrderUpdated`.
+**Data owned:** order\_id, customer\_id, lines, price\_breakdown, payment\_refs, shipment\_refs, lifecycle status, timestamps, metadata.
+**Storage:** Relational DB (Postgres) or event-sourced store depending on architecture.
+**SLAs:** High availability for reads; writes must be durable; maintain ACID for order creation.
+
+---
+
+### Payment Service (payment-service)
+
+**Responsibilities:** Manage payment authorizations, captures, holds, refunds, and tokenized payment instruments. Enforce PCI scope minimization by using payment gateway tokens.
+**APIs:** `POST /payments/authorize`, `POST /payments/capture`, `POST /payments/refund`, `GET /payments/{id}`.
+**Events emitted:** `PaymentAuthorized`, `PaymentCaptured`, `PaymentFailed`, `PaymentRefunded`.
+**Notes:** Use idempotency keys for operations; store minimal card metadata; prefer PCI-certified third-party processors for card data.
+
+---
+
+### Payment Gateway Adapter (payment-adapter)
+
+**Responsibilities:** Adapter layer for specific payment gateways (Stripe, Adyen, PayPal). Translate internal requests to gateway APIs, handle webhooks, and normalize status.
+**APIs:** internal RPC; webhooks endpoint to receive gateway notifications.
+**Notes:** Implement retry/backoff and reconcile failed/uncertain states with payment-service.
+
+---
+
+### Reservation & Inventory Locking Service (reservation-service)
+
+**Responsibilities:** Reserve stock for cart/checkout and create time-bound holds. Support multi-warehouse reservations, partial reservations, release policies and reservation extensions.
+**APIs:** `POST /reservations` (reserve lines), `POST /reservations/{id}/release`, `GET /reservations/{id}`.
+**Events:** `Reserved`, `ReservationReleased`, `ReservationExpired`.
+**Storage:** Strongly-consistent datastore with optimistic/pessimistic locking (Postgres or specialized store); optionally backed by Redis for TTL-based holds.
+**Notes:** Reservation pattern choices (optimistic vs pessimistic) depend on business SLA and stock velocity.
+
+---
+
+### Fulfillment Orchestrator (fulfillment-service)
+
+**Responsibilities:** Orchestrates fulfillment workflows: allocate to warehouse, create pick-pack-ship tasks, handle dropship and marketplace fulfillment, manage shipment states.
+**APIs:** `POST /fulfillments` (create fulfillment), `GET /shipments/{id}`, `POST /fulfillments/{id}/cancel`.
+**Events emitted/consumed:** `FulfillmentRequested`, `FulfillmentAllocated`, `FulfillmentShipped`, `FulfillmentFailed`.
+**Notes:** Integrates with WMS and shipping-service; supports multiple fulfillment strategies (ship-from-store, ship-from-warehouse, dropship).
+
+---
+
+### WMS Connector (wms-adapter)
+
+**Responsibilities:** Adapter for warehouse management systems — push pick/pack tasks, receive allocation/shipment confirmations, and support inventory reconciliations.
+**APIs:** connector endpoints; webhooks.
+**Notes:** Implement retries, idempotency, and reconcile processes.
+
+---
+
+### Shipping & Carrier Service (shipping-service)
+
+**Responsibilities:** Rate shopping, label creation, tracking, delivery estimate, carrier contract logic, manifesting, and returns forwarding.
+**APIs:** `POST /shipments/rate`, `POST /shipments/create-label`, `GET /track/{trackingId}`.
+**Events:** `ShipmentLabelCreated`, `ShipmentInTransit`, `ShipmentDelivered`, `ShipmentException`.
+**Notes:** Use carrier adapters and support batching for labels and manifests.
+
+---
+
+### Tax Service (tax-service)
+
+**Responsibilities:** Compute tax (line-level or cart-level) for destination jurisdictions; integrate with external tax providers when required.
+**APIs:** `POST /calculate-tax`.
+**Notes:** Cache tax rates with TTL; persist tax decision in order for audit.
+
+---
+
+### Promotions & Pricing Adapter (pricing-adapter)
+
+**Responsibilities:** Interface to pricing & promotions systems to resolve price and promotion impact during checkout.
+**APIs:** `POST /resolve-prices`.
+**Notes:** Must be fast; use cached promotions snapshots when possible.
+
+---
+
+### Fraud Detection Service (fraud-service)
+
+**Responsibilities:** Evaluate checkout context for fraud risk (device fingerprinting, velocity, geolocation, risky BINs) and return risk score and recommended actions (block, review, allow).
+**APIs:** `POST /score`.
+**Events:** `FraudAlert`, `FraudCleared`.
+**Notes:** Integrates with payments and order workflows; support manual review queues.
+
+---
+
+### Notification Service (notification-service)
+
+**Responsibilities:** Send order confirmations, shipping notifications, refund notices, and SLA alerts via email, SMS, push, or webhooks.
+**APIs:** `POST /notify`.
+**Notes:** Messages are templated and queued; ensure idempotent delivery and retry logic.
+
+---
+
+### Returns & RMA Service (returns-service)
+
+**Responsibilities:** Handle return authorisations (RMAs), return shipping labels, inspection workflows, and disposition (refund, repair, restock).
+**APIs:** `POST /returns`, `GET /returns/{rmaId}`.
+**Events:** `ReturnRequested`, `ReturnReceived`, `ReturnProcessed`.
+**Notes:** Integrates with shipping-service and refund-service; capture disposition metadata and restocking instructions.
+
+---
+
+### Refunds & Chargeback Service (refund-service)
+
+**Responsibilities:** Coordinate refunds with payment-service, ledger adjustments, partial refunds, and chargeback handling.
+**APIs:** `POST /refunds`, `GET /refunds/{id}`.
+**Events:** `RefundInitiated`, `RefundCompleted`, `ChargebackReceived`.
+**Notes:** Keep strong audit trail and reconciliation with accounting.
+
+---
+
+### Accounting / Invoicing Service (billing-service)
+
+**Responsibilities:** Generate invoices, post revenue events, manage deferred revenue schedules, and export to ERP for accounting.
+**APIs:** `POST /invoices`, `GET /invoices/{id}`.
+**Notes:** Integration with tax-service and refund-service; ensure financial-grade accuracy.
+
+---
+
+### Order History & Audit Service (audit-service)
+
+**Responsibilities:** Immutable event store of order lifecycle events for audit, compliance, and reconciliation. Provide queryable history for legal and customer support.
+**APIs:** `GET /audit?orderId=`, `POST /audit/query`.
+**Storage:** Append-only store or event store; retention and archiving policies.
+
+---
+
+### Customer Order Portal Backend (customer-orders-service)
+
+**Responsibilities:** Read-optimized surfaced for customers and CS agents: order status, tracking, returns, and re-order.
+**APIs:** `GET /customers/{id}/orders`, `GET /orders/{id}/status`.
+**Notes:** Subscribes to order and shipment events to keep denormalized views.
+
+---
+
+### Analytics & Reporting Service (analytics-service)
+
+**Responsibilities:** Aggregate metrics: conversion rates, checkout abandonment, fulfillment lead times, revenue recognition, and exceptions.
+**APIs:** `GET /reports/checkout-conversion`, `GET /reports/fulfillment-latency`.
+**Notes:** Ingest events from order-service, payment-service, shipping-service.
+
+---
+
+### Saga Orchestrator / Workflow Engine (saga-orchestrator)
+
+**Responsibilities:** Orchestrate long-running order processes and compensations (e.g., reserve inventory, authorize payment, allocate fulfillment). Provide visibility and manual retry controls.
+**APIs:** UI/ops endpoints to inspect sagas and restart/compensate flows.
+**Notes:** Implement durable sagas with persistent state (e.g., with a workflow engine or custom orchestrator).
+
+---
+
+## 4. Key flows & sagas
+
+### Checkout → Order Placement (simplified)
+
+1. Client submits `POST /checkout` → checkout-service validates cart and resolves prices via pricing-adapter and tax-service.
+2. checkout-service requests reservation-service to reserve inventory (time-bound). Fail -> notify user.
+3. checkout-service calls fraud-service to evaluate risk. If high risk, mark for review and halt.
+4. checkout-service requests payment-service `authorize` (or uses payment gateway to tokenize + authorize).
+5. On successful authorization, checkout-service triggers order-service to create an idempotent `OrderCreated` record and emits `OrderCreated` event.
+6. Saga orchestrator starts fulfillment saga: allocate to warehouse via fulfillment-service, create pick/pack task in WMS, and request shipping label via shipping-service.
+7. After shipment event (`FulfillmentShipped`), payment-service captures payment (or capture earlier depending on business rules).
+8. Emit `OrderCompleted` when all items delivered or after settlement.
+
+### Payment capture & settlement
+
+* **Authorize-first model:** Authorize at checkout, capture on shipment or at defined event. Capture via payment-service; handle capture failures with retry and reconciliation.
+* **Immediate-capture model:** Capture at checkout; handle refunds if order cancelled.
+
+### Reservation, partial shipments & backorders
+
+* Reserve items at checkout. Support partial reservations per SKU. If stock insufficient, either backorder or prevent checkout depending on policy.
+* For partial shipments, create multiple shipment entities under the order; each shipment has independent tracking and potential separate captures/refunds.
+
+### Cancellation & refund
+
+* Cancellation allowed pre-capture or pre-fulfillment: release reservations and void authorization.
+* Post-capture cancellations require refund flow via refund-service and ledger updates in billing-service.
+
+### Returns & RMA
+
+* Customer initiates `POST /returns` -> returns-service issues RMA if eligible and provides return label via shipping-service.
+* On receipt, returns inspect process determines disposition and triggers refund-service and inventory reconciliation.
+
+---
+
+## 5. Data ownership and consistency patterns
+
+* **Order-service** is the single source-of-truth for order state.
+* **Reservation-service** owns transient stock locks and TTL semantics.
+* **Inventory authoritative store (inventory-service)** remains source-of-truth for stock quantities; reservation-service writes reservations against it or a derived view.
+* **Event-driven denormalized read models** for customer-views, admin dashboards, and analytics.
+* **Sagas to manage cross-service consistency**, with explicit compensations (e.g., release reservation, void authorization).
+
+---
+
+## 6. Integrations & adapters
+
+* **Payment gateways:** tokenization, webhooks, reconciliation.
+* **WMS & carriers:** connector-service to adapt to different WMS/ERP/carrier APIs.
+* **ERP:** order and financial sync for fulfillment, invoicing, and inventory reconciliation.
+* **Marketplaces:** adapters to consume/syndicate orders and push shipment and tracking updates.
+
+---
+
+## 7. Pricing, promotions & taxes interactions
+
+* Resolve final price and promotions during checkout orchestration via pricing-adapter.
+* Persist resolved price and tax decisions in order for audit and refunds.
+* Use promotion-engine's snapshot/version to ensure reproducibility of discounts applied.
+
+---
+
+## 8. Idempotency, retries & error handling
+
+* All external-facing POSTs use idempotency keys. Internally, commands are idempotent via unique correlation IDs.
+* Retries use exponential backoff with dead-letter queue and manual ops review.
+* Implement reconciliation jobs to detect and repair inconsistent states (e.g., payment authorized but order not created).
+
+---
+
+## 9. Observability, monitoring & SLOs
+
+* **Metrics to track:** checkout latency, authorization latency, reservation success rate, fulfillment lead time, refund processing time, order exceptions.
+* **Traces:** end-to-end trace for checkout → payment → fulfillment → delivery.
+* **SLO examples:** checkout P95 < 200ms for validation & price resolution; payment auth P95 < 500ms; reservation latency < 150ms.
+* **Alerts:** high abandonment, payment gateway errors, reservation expiry spikes, fulfillment delays.
+
+---
+
+## 10. Testing, contract testing & audits
+
+* **Contract tests (Pact) between services:** checkout ↔ pricing-adapter, checkout ↔ payment-service, order-service ↔ fulfillment-service.
+* **End-to-end deterministic tests** using golden datasets (simulate payments with sandbox gateways).
+* **Chaos testing:** simulate carrier delays, payment timeouts, WMS failures.
+* **Audit trails**: every state change has actor, timestamp, correlation id.
+
+---
+
+## 11. Security & compliance
+
+* **PCI DSS:** minimize scope by using tokenization and gateway-hosted payment pages or SDKs.
+* **Authentication & Authorization:** central authz-service for RBAC in admin UI and CS tools.
+* **PII handling:** encrypt sensitive fields at rest; redact in logs; access control for audit records.
+* **Data retention & legal holds** for orders and taxes per jurisdiction.
+
+---
+
+# Payment Microservices Catalog
+
+*Comprehensive catalog of microservices, APIs, events, data models, integration patterns, non-functional requirements, operational runbooks, and deployment guidance for a Payment Service within an eCommerce platform.*
+
+---
+
+## Table of contents
+
+1. Overview & Goals
+2. High-level domain model
+3. Microservice catalog (detailed)
+
+   * 3.1 Payments Gateway / Orchestrator Service
+   * 3.2 Payment Processor Adapters (Gateway Connectors)
+   * 3.3 Tokenization / Vault Service
+   * 3.4 Payment Authorizations Service
+   * 3.5 Capture & Settlement Service
+   * 3.6 Refunds & Reversals Service
+   * 3.7 Chargeback & Dispute Management Service
+   * 3.8 Payouts / Transfers Service (marketplaces)
+   * 3.9 Payment Reconciliation Service
+   * 3.10 Fraud Detection & Risk Service
+   * 3.11 Compliance & PCI Audit Service
+   * 3.12 Billing & Subscription Service (if applicable)
+   * 3.13 Webhook Delivery & Notification Service
+   * 3.14 Payments Read Model / Reporting Service
+   * 3.15 Sandbox & Test Harness Service
+   * 3.16 Metrics & Telemetry Aggregator
+4. Cross-cutting architecture & patterns
+
+   * Security & PCI-DSS boundaries
+   * Idempotency & retries
+   * Sagas and transaction models
+   * Eventing & topics
+   * Observability & SLAs
+   * Data partitioning & scaling
+5. Canonical data models
+6. Public APIs & example flows (REST + events)
+7. Events catalogue (topics, schemas, retention suggestions)
+8. Error handling & retry strategies
+9. Testing, QA & certification
+10. CI/CD, deployment & scaling guidance
+11. Operational runbook (incidents & playbooks)
+12. Settlement, accounting & finance handover
+13. Cost, capacity planning and vendor selection notes
+14. Migration & backward compatibility strategy
+15. Appendix: sample OpenAPI snippets, sample event schemas, webhook security
+
+---
+
+# 1. Overview & Goals
+
+**Mission:** Provide a secure, reliable, auditable, and extensible payments platform to process authorizations, captures, refunds, chargebacks, and payouts across multiple payment providers, support subscriptions/billing where required, protect cardholder data through tokenization and PCI-DSS compliant boundaries, and integrate with order, inventory, accounting, and fraud systems.
+
+**Key non-functional goals:**
+
+* Security & compliance: PCI-DSS compliance for the card data scope (minimize scope through tokenization and hosted pages).
+* Availability: 99.95% for non-critical reads, high reliability for authorization flows (target 99.9% up when integrating external PSPs subject to provider SLAs).
+* Latency: authorization latency target p95 < 500ms for fast gateways; provide graceful degradations for slower providers.
+* Correctness: ensure idempotent operations to avoid duplicate captures/charges.
+* Auditability & reconciliation: full immutable ledger for every money movement.
+* Extensibility: add/remove gateway adapters without changing business logic.
+
+# 2. High-level domain model
+
+Primary entities:
+
+* **PaymentMethod** — tokenized instrument or external provider reference (card token, wallet id, bank account, PSD2 consent)
+* **PaymentAuthorization** — an authorization hold requested from a PSP (status: pending/authorized/declined/errored)
+* **PaymentCapture** — capture of previously authorized funds (partial/complete)
+* **PaymentTransaction** — generic ledger entry (type: authorization, capture, refund, reversal, payout)
+* **Refund** — refund transaction referencing capture or order
+* **Chargeback/Dispute** — contested transaction from cardholder/bank
+* **Payout** — transfer of funds to sellers/vendors for marketplace or payouts to bank accounts
+* **SettlementBatch** — reconciled group of captures/transactions settled by PSP
+* **PaymentEvent** — domain events for all payment lifecycle transitions
+
+# 3. Microservice catalog (detailed)
+
+> Each microservice entry includes responsibilities, key APIs, event contracts, storage model, partitioning keys, consistency model, scaling strategy, failure modes and compensations.
+
+---
+
+## 3.1 Payments Gateway / Orchestrator Service
+
+**Responsibilities**
+
+* Central orchestration of payment flows for the platform: routes authorizations/captures/refunds to appropriate gateway adapter based on routing rules (country, currency, BIN, cost, success rate, card type, merchant preferences)
+* Maintain routing rules, provider priority, fallbacks and failover logic
+* Implement idempotency, correlation and central logging for payment flows
+* Provide a single business-facing API for upstream services (Order, Checkout, Billing)
+
+**APIs (examples)**
+
+* `POST /payments/authorize` → start an authorization; accepts `idempotencyKey`, `paymentMethodId` (or token), `amount`, `currency`, `orderId`, `metadata`
+* `POST /payments/capture` → capture previously authorized transaction
+* `POST /payments/refund` → refund a capture or charge
+* `GET /payments/{paymentId}` → get payment status and lifecycle
+* `POST /payments/payout` → create vendor payout (if marketplace)
+
+**Events published**
+
+* `payment.authorization.requested`, `payment.authorization.succeeded`, `payment.authorization.failed`
+* `payment.captured`, `payment.refunded`, `payment.chargeback.created`
+
+**Storage**
+
+* Durable store (Postgres or equivalent) as source of truth for payment objects and status transitions; append-only transaction log for audit
+
+**Partition key**
+
+* `merchantId` (multi-merchant), or `paymentId` for single-tenant. Shard by merchantId for multi-tenant systems.
+
+**Consistency & SLAs**
+
+* Strong consistency for payment state transitions; guarantee idempotent outcomes
+* SLA depends on upstream PSPs; provide gateways health & degrade gracefully (e.g., route to alternate gateway or queue)
+
+**Failure modes & compensations**
+
+* PSP returns error/timeout: retry with exponential backoff, optionally route to backup gateway
+* Network partitions: mark state as `pending` and queue for replay; notify ops if retries exceed thresholds
+
+---
+
+## 3.2 Payment Processor Adapters (Gateway Connectors)
+
+**Responsibilities**
+
+* Vendor-specific protocol translation (Stripe, Adyen, Braintree, Worldpay, PayPal, local acquirers)
+* Implement provider-specific idempotency, id composition, and signature verification for webhooks
+* Normalize gateway responses into canonical domain models
+
+**Design**
+
+* Treat adapters as separate, deployable microservices or isolated modules behind the Payments Orchestrator. Provide retries, rate-limiting per gateway, and backoff.
+* Maintain a health-check page and metrics per adapter (success rate, avg latency, errors)
+
+**Security**
+
+* Secrets (API keys) stored securely in vault and injected via environment; minimal logs avoid persisting sensitive nonce/PII
+
+---
+
+## 3.3 Tokenization / Vault Service
+
+**Responsibilities**
+
+* Receive PAN and sensitive card data securely (PCI SAQ-A approach: via hosted fields or client-side SDKs) or accept encrypted blobs from frontend; tokenize to a payment token or vault id
+* Manage tokens lifecycle (create, rotate, revoke) and mapping to vault references used by other services
+* Support multiple tokenization backends (PSP vaults) and unified token format
+
+**APIs**
+
+* `POST /tokens` (create token from card data or provider token)
+* `GET /tokens/{tokenId}` (meta only; do not return PAN)
+* `DELETE /tokens/{tokenId}` (revoke)
+
+**PCI boundary**
+
+* This service handles the tokenization flow within the card data-in-scope boundary. Strong security controls, encryption at rest, hardware security modules (HSMs) or PSP's vault recommended.
+
+**Storage & rotation**
+
+* Persist token metadata only. If storing encrypted sensitive fields, use HSM. Implement rotating encryption keys and token rotation policies.
+
+---
+
+## 3.4 Payment Authorizations Service
+
+**Responsibilities**
+
+* Create authorizations with gateway via orchestrator and manage authorization hold lifecycle (expiry, partial capture, release)
+* Enforce idempotency and store authorization metadata (auth code, expiry, availableToCapture)
+
+**APIs**
+
+* `POST /authorizations` { paymentMethodToken, amount, currency, orderId }
+* `POST /authorizations/{authId}/capture` (partial/full)
+* `POST /authorizations/{authId}/void` (before capture)
+
+**Consistency**
+
+* Requires strong, transactional operations; once an authorization succeeds, its available capture balance must be tracked reliably.
+
+**Failure modes**
+
+* Authorization succeeds at PSP but callback fails: use reconcile and webhook deliveries to ensure final state synchronized.
+
+---
+
+## 3.5 Capture & Settlement Service
+
+**Responsibilities**
+
+* Capture funds from authorizations (immediate or delayed), manage partial captures, and maintain capture/settlement lifecycle
+* Create settlement batches to reconcile with PSP settlement reports
+
+**APIs**
+
+* `POST /captures` { authorizationId, amount }
+* `GET /captures/{captureId}`
+
+**Events**
+
+* `payment.captured`, `payment.settled` (after PSP settlement report processed)
+
+**Notes**
+
+* Distinguish between authorization-level capture and PSP settlement (merchant receives funds later). Capture success does not equal settlement.
+
+---
+
+## 3.6 Refunds & Reversals Service
+
+**Responsibilities**
+
+* Create refunds (full/partial) against captures; support issuer reversals and refund to original payment method or store credit
+* Track refund status and map to PSP refund ids
+
+**APIs**
+
+* `POST /refunds` { captureId, amount, reason }
+* `GET /refunds/{refundId}`
+
+**Idempotency**
+
+* Must be idempotent; record idempotencyKey and ensure single refund per key
+
+**Failure modes**
+
+* PSP refunds may be asynchronous; track pending refunds and reconcile with PSP reports
+
+---
+
+## 3.7 Chargeback & Dispute Management Service
+
+**Responsibilities**
+
+* Ingest chargeback notifications from PSPs (issuer communications), track disputes lifecycle (received, responded, won, lost)
+* Provide workflow for business to upload evidence and communicate with acquirer
+* When dispute is lost, create accounting adjustments and notify finance
+
+**APIs**
+
+* `POST /chargebacks` (ingest), `GET /chargebacks/{id}`, `POST /chargebacks/{id}/evidence`
+
+**Events**
+
+* `chargeback.received`, `chargeback.response.submitted`, `chargeback.resolved`
+
+**Compliance**
+
+* Keep evidence artifacts immutable and maintain timestamps for dispute time windows
+
+---
+
+## 3.8 Payouts / Transfers Service (marketplaces)
+
+**Responsibilities**
+
+* Send funds to sellers, manage payout schedules, fees, and withholding rules
+* Support multiple payout methods: bank transfer (ACH/SEPA), card payouts, wallet, instant payouts
+* Handle currency conversion and fees or leverage PSP native payout features
+
+**APIs**
+
+* `POST /payouts` { payeeId, amount, currency, method, schedule }
+* `GET /payouts/{payoutId}`
+
+**Events**
+
+* `payout.initiated`, `payout.completed`, `payout.failed`
+
+**Considerations**
+
+* For two-sided marketplaces, manage withheld funds and liability; apply reconciliation with settlement batches
+
+---
+
+## 3.9 Payment Reconciliation Service
+
+**Responsibilities**
+
+* Reconcile PSP settlement reports with captured transactions to produce settlement batches and accounting-ready ledgers
+* Detect mismatches (fees, chargebacks, refunds) and create reconciliation adjustments
+
+**APIs**
+
+* `POST /reconciliations/{merchantId}/upload` (ingest settlement/csv/psp report)
+* `GET /reconciliations/{id}/report`
+
+**Storage**
+
+* Append-only ledger (immutable) for financial audit; snapshot and export to accounting system
+
+**Failure modes**
+
+* Missing PSP reports: flag for manual review and hold payouts if necessary
+
+---
+
+## 3.10 Fraud Detection & Risk Service
+
+**Responsibilities**
+
+* Real-time risk scoring of transactions using rules + ML models (velocity checks, device fingerprinting, geolocation, BIN checks)
+* Provide accept/deny/review decisioning API and support for manual review queues
+* Manage whitelists/blacklists and adaptive learning from outcomes
+
+**APIs**
+
+* `POST /risk/score` { paymentAttempt, deviceContext, userHistory }
+* `GET /risk/decisions/{id}`
+
+**Integration**
+
+* Send suspicious transactions to manual review microservice or external fraud vendors (e.g., Sift, Riskified)
+* Integrate with checkout orchestrator to block or require 3DS/step-up authentication
+
+---
+
+## 3.11 Compliance & PCI Audit Service
+
+**Responsibilities**
+
+* Centralize controls, logging and reporting required for PCI-DSS and other payment regulations (e.g., PSD2 SCA)
+* Maintain evidence bundles for audits and track compliance tasks
+
+**APIs**
+
+* `GET /compliance/audit-log?from=&to=`
+* `POST /compliance/scope-update`
+
+**Notes**
+
+* Aim to reduce PCI scope by using PSP-hosted fields, client-side encryption and tokenization
+
+---
+
+## 3.12 Billing & Subscription Service (optional)
+
+**Responsibilities**
+
+* Support recurring billing, subscription lifecycle, invoice generation, dunning, and retries
+* Integrate with Authorizations/Captures for recurring charges and stored payment methods
+
+**APIs**
+
+* `POST /subscriptions`, `POST /subscriptions/{id}/charge`, `POST /subscriptions/{id}/cancel`
+
+**Design**
+
+* Separate long-running billing schedules from transaction processing; use event-driven triggers for bill run
+
+---
+
+## 3.13 Webhook Delivery & Notification Service
+
+**Responsibilities**
+
+* Reliable delivery of PSP webhooks and internal payment events to interested consumers (order service, merchant dashboard)
+* Handle signature verification, retry logic, dead-lettering
+
+**Features**
+
+* Exponential backoff, per-subscriber retry policies, webhook signing keys, delivery metrics
+
+---
+
+## 3.14 Payments Read Model / Reporting Service
+
+**Responsibilities**
+
+* Provide aggregated, denormalized views for dashboards (payments by status, revenue, refunds), queryable reports for finance
+* Materialize data from payment events and reconciliation outcomes
+
+**APIs**
+
+* `GET /reports/payments?from=&to=&merchantId=`
+
+---
+
+## 3.15 Sandbox & Test Harness Service
+
+**Responsibilities**
+
+* Provide a sandbox environment for dev/test to emulate gateway behavior, webhooks, edge cases (delays, declines, network errors)
+* Implement test cards, error injection, and replayable scenarios
+
+**APIs**
+
+* `POST /sandbox/gateway/simulate` { scenario }
+
+---
+
+## 3.16 Metrics & Telemetry Aggregator
+
+**Responsibilities**
+
+* Domain-specific metrics: authorization success rate, declines by reason, avg latency per gateway, reconciliation coverage, dispute rate
+* Expose dashboards and alerts for SRE/Finance/Product
+
+**Key metrics**
+
+* `payments.auth.success.rate`, `payments.auth.latency.p95`, `payments.refund.rate`, `payments.chargeback.rate`
+
+---
+
+# 4. Cross-cutting architecture & patterns
+
+## Security & PCI-DSS boundaries
+
+* Minimize systems that touch PAN by using client-side tokenization or PSP-hosted payment pages.
+* Isolate the tokenization/vault service in a hardened, monitored environment. Use HSM for encryption keys where required.
+* Keep an inventory of in-scope services; log access, rotate secrets, and perform regular pentests.
+* Use strong encryption for data at rest and TLS 1.2/1.3 for in-transit data.
+
+## Idempotency & retries
+
+* All mutating endpoints must accept `idempotencyKey` and persist it with the result for TTL (e.g., 30 days for payments) to avoid duplicate charges.
+* Retry only idempotent-safe operations; do not retry non-idempotent operations without careful orchestration.
+
+## Sagas and transaction models
+
+* Use orchestrated sagas for multi-step flows (authorize → capture → refund) where compensation is required.
+* Prefer eventual consistency for non-critical flows, but ensure financial ledger is authoritative and immutable.
+
+## Eventing & topics
+
+* Use a reliable streaming platform (Kafka) with topics: `payments.events`, `payouts.events`, `chargebacks.events`, `reconciliation.events`.
+* Schema registry for JSON Schema/Avro to preserve compatibility.
+
+## Observability & SLAs
+
+* Distributed tracing through payment flows to correlate user checkout → PSP response → webhooks → reconciliation
+* SLAs: define internal error budgets and external provider dependency targets; alert on degradation
+
+## Data partitioning & scaling
+
+* Shard by `merchantId`, `region`, or `paymentMethodType` as required. Reads are reporting-heavy: use read replicas and materialized views.
+
+# 5. Canonical data models
+
+**PaymentTransaction**
+
+```json
+{
+  "paymentId": "pay-uuid",
+  "merchantId": "m-123",
+  "orderId": "ord-123",
+  "type": "authorization|capture|refund|reversal|payout",
+  "amount": 1000,
+  "currency": "GBP",
+  "status": "pending|succeeded|failed|reversed",
+  "provider": "stripe",
+  "providerTransactionId": "ch_1ABC",
+  "createdAt": "2025-08-01T12:00:00Z",
+  "metadata": {}
+}
+```
+
+**Authorization**
+
+```json
+{
+  "authId": "auth-uuid",
+  "paymentId": "pay-uuid",
+  "amount": 1000,
+  "currency": "GBP",
+  "status": "authorized|declined|expired",
+  "authCode": "AUTH123",
+  "expiresAt": "2025-08-08T12:00:00Z"
+}
+```
+
+**Refund**
+
+```json
+{
+  "refundId": "r-uuid",
+  "captureId": "c-uuid",
+  "amount": 500,
+  "status": "pending|succeeded|failed",
+  "providerRefundId": "re_1XYZ"
+}
+```
+
+# 6. Public APIs & example flows (REST + events)
+
+**Authorize flow (synchronous)**
+
+1. Client obtains payment token (client-side or vault)
+2. `POST /payments/authorize` → orchestrator picks gateway, sends request to adapter
+3. On success, return `200` with `paymentId`, `status: authorized`, `authId`
+4. Publish `payment.authorization.succeeded` event
+
+**Capture flow (async-safe)**
+
+1. `POST /payments/capture` {authId, amount}
+2. If provider responds async, store `pending` and await webhook; else update status and emit `payment.captured`
+
+**Refund flow**
+
+1. `POST /refunds` {captureId, amount, idempotencyKey}
+2. Process via gateway, mark refund status, emit `payment.refunded`
+
+# 7. Events catalogue (topics, schemas, retention suggestions)
+
+* `payment.authorization.requested` — { paymentId, authId, amount, currency, merchantId }
+* `payment.authorization.succeeded` — { paymentId, authId, providerTxnId, authCode }
+* `payment.captured` — { paymentId, captureId, amount }
+* `payment.refunded` — { refundId, paymentId, amount }
+* `chargeback.received` — { chargebackId, paymentId, reason, amount }
+* `payout.completed` — { payoutId, merchantId, amount }
+
+**Retention**: Keep hot topics 7–30 days. Archive to secure object store (S3) for audit/finance (7+ years depending on jurisdiction & finance needs).
+
+# 8. Error handling & retry strategies
+
+* Classify errors: `transient` (network/timeouts), `permanent` (card declined), `provider-rate-limit`, `validation`.
+* Retries for transient errors with exponential backoff and jitter; do NOT retry permanent declines.
+* Implement dead-letter queues for failed async operations requiring manual intervention.
+
+# 9. Testing, QA & certification
+
+* Unit & integration tests; contract tests for adapters and webhook consumers
+* End-to-end test harness using sandbox PSPs and simulated webhooks
+* PCI readiness scans, penetration testing, and SAQ / ROC evidence
+* Simulate edge cases: partial captures, delayed settlement, chargebacks, refunds, network partitions
+
+# 10. CI/CD, deployment & scaling guidance
+
+* Separate adapter deployments so gateway changes can be rolled independently
+* Canary deploys for orchestrator logic or routing rule changes
+* Use blue/green for Vault/Tokenization updates to avoid outages
+* Scale stateless APIs horizontally; scale data stores by partitioning
+
+# 11. Operational runbook (incidents & playbooks)
+
+**Incident: PSP outage (provider down)**
+
+* Identify impacted merchants via routing table
+* Failover to backup provider if configured; otherwise queue requests and notify operations and merchants
+* If backlog grows, slow down non-critical polling and prioritize authorizations
+
+**Incident: Duplicate charges detected**
+
+* Use idempotency logs to reconcile; if duplicates already charged, issue refunds and notify finance; investigate root cause and patch idempotency persistence
+
+**Incident: Chargeback surge**
+
+* Pause high-risk flows, escalate to fraud/compliance, hold affected payouts, gather evidence
+
+# 12. Settlement, accounting & finance handover
+
+* Produce settlement batches and daily reports for finance including fees, refunds, chargebacks, net settlement
+* Provide export formats for ERPs or accounting systems (CSV, XBRL, direct API)
+* Tag transactions with GL codes and merchant account identifiers for ledger mapping
+
+# 13. Cost, capacity planning and vendor selection notes
+
+* Evaluate PSPs by: success rate by BIN/country, authorization latency, fees (interchange + markup), fraud tools, payout options
+* Plan for peak authorization QPS; size adapters and connector pools by expected TPS and rate limits
+* Budget for HSMs, PCI compliance audits and forensic logging
+
+# 14. Migration & backward compatibility strategy
+
+* Version APIs and preserve event compatibility with schema registry
+* For PSP migrations, support dual-write or progressive cutover with traffic splitting by percentage/merchant
+* Backfill historical transactions into ledger during migration and mark them with source id
+
+# Shipping & Fulfillment Microservices Catalog
+
+*Comprehensive catalog of microservices, APIs, events, data models, integration patterns, non-functional requirements, operational runbooks, and deployment guidance for Shipping & Fulfillment in eCommerce.*
+
+---
+
+## Table of Contents
+
+1. Overview & Goals
+2. High-level domain model
+3. Microservice catalog (detailed)
+
+   * 3.1 Fulfillment Orchestrator (Order → Fulfillment Saga)
+   * 3.2 Order Fulfillment Service (Fulfillment Units)
+   * 3.3 Warehouse Management Adapter (WMS Connector)
+   * 3.4 Inventory Reservation & Allocation Service (ties to Inventory Core)
+   * 3.5 Carrier Integration & Rate Shopping Service
+   * 3.6 Shipping Rate & Pricing Service
+   * 3.7 Label, Documentation & Compliance Service
+   * 3.8 Tracking & Events Aggregator Service
+   * 3.9 Manifesting, Batching & Run Generation Service
+   * 3.10 Pickup / Same-day / Local Delivery Service
+   * 3.11 Returns & Reverse Logistics (RMA) Service
+   * 3.12 Customs, Duties & International Clearance Service
+   * 3.13 Last Mile Orchestration & Delivery Partner API
+   * 3.14 Exceptions, Claims & Insurance Service
+   * 3.15 Slot Booking & Carrier Capacity Service
+   * 3.16 Fulfillment Read Model / Query Service
+   * 3.17 Audit & Compliance Service (shipping records)
+   * 3.18 Sandbox / Carrier Test Harness
+   * 3.19 Metrics & Telemetry Aggregator
+4. Cross-cutting patterns & architecture
+
+   * Event-driven sagas & choreography
+   * Idempotency & deduplication
+   * Transactional guarantees & compensations
+   * Data partitioning & sharding
+   * Security (data, carrier creds) & compliance
+   * Observability & tracing
+5. Canonical data models
+6. API design guidelines & examples (REST + events)
+7. Events catalogue (topics, schemas, retention suggestions)
+8. Observability, monitoring & alerting
+9. Testing, QA & contract testing
+10. CI/CD, deployment & scaling guidance
+11. Operational runbook (common incidents & playbooks)
+12. Capacity planning and cost considerations
+13. Migration & backward compatibility strategy
+14. Appendix: sample OpenAPI snippets, sample event schemas
+
+---
+
+# 1. Overview & Goals
+
+**Mission:** Provide a resilient, auditable, and extensible shipping and fulfillment platform that turns confirmed orders into delivered packages with optimal cost, speed and reliability; integrates with multiple carriers and WMSs; supports multiple fulfillment strategies (ship-from-warehouse, ship-from-store, 3PL, dropship, marketplace sellers); handles returns, customs, insurance, and last-mile orchestration.
+
+**Key non-functional goals:**
+
+* Accuracy: correct allocation, pick instructions, and shipping labels to minimize mis-shipments.
+* Availability: 99.95% for read/query; 99.9% for critical write flows (fulfillment orchestration).
+* Latency: low-latency responses for rate shopping and checkout (<200ms p95 for common carriers).
+* Scalability: handle spikes (Peak/BFCM), scale per-warehouse and per-carrier.
+* Observability: full trace from order → pick → ship → delivery with SLA monitoring.
+* Auditability & compliance: immutable records suitable for finance and customs.
+
+# 2. High-level domain model
+
+Primary entities:
+
+* **Order** — upstream order details (id, channel, shippingAddress, order lines)
+* **FulfillmentUnit** — unit of work: sku(s), quantity, assigned warehouse or source (ship-from)
+* **FulfillmentJob / Task** — pick-pack-ship job created for WMS
+* **Allocation** — items allocated to a fulfillment source and a carrier/service option
+* **Shipment** — carrier-facing package(s) with tracking number, label, carrier service, weight, dimensions
+* **Manifest** — batch of shipments handed to carrier
+* **TrackingEvent** — carrier status updates (in-transit, out-for-delivery, delivered, exception)
+* **RMA** — return authorization record and return shipment
+
+# 3. Microservice catalog (detailed)
+
+> Each microservice includes responsibilities, key APIs, event contracts, storage model, partitioning/sharding key, consistency model, scaling strategy, and failure modes & compensations.
+
+---
+
+## 3.1 Fulfillment Orchestrator (Order → Fulfillment Saga)
+
+**Responsibilities**
+
+* Central controller that coordinates the fulfillment saga from `order.confirmed` to `shipment.created` to `shipment.delivered`.
+* Enforce business rules: split orders by availability, source optimization (cost/speed), SLA constraints, compliance checks (hazmat, restricted items).
+* Trigger allocation, rate-shopping, carrier booking, label generation, and manifesting.
+* Handle error/compensation flows: reallocate, cancel shipment, reroute.
+
+**APIs**
+
+* `POST /fulfillment/start` { orderId }
+* `GET /fulfillment/{id}/status`
+* `POST /fulfillment/{id}/replan` (re-run routing)
+
+**Events published/subscribed**
+
+* Subscribes: `order.confirmed`, `inventory.reserved`, `reservation.failed`
+* Publishes: `fulfillment.allocation.requested`, `fulfillment.shipment.created`, `fulfillment.failed`
+
+**Storage**
+
+* Durable store for saga state (Postgres or distributed workflow store)
+
+**Partitioning**
+
+* Shard by `merchantId`/`warehouseId`/`orderId` depending on scale
+
+**Consistency**
+
+* Strong transactional updates within orchestrator state; eventual consistency with downstream systems; compensating transactions for rollbacks.
+
+**Failure modes**
+
+* Carrier booking fails: attempt alternate carrier or queue for manual intervention; notify ops and customer.
+
+---
+
+## 3.2 Order Fulfillment Service (Fulfillment Units)
+
+**Responsibilities**
+
+* Break orders into fulfillment units (per SKU, per quantity, per source). Represent the minimal unit that can be picked and shipped.
+* Track lifecycle: created → allocated → picked → packed → shipped
+* Provide APIs for downstream WMS and fulfillment read models.
+
+**APIs**
+
+* `POST /fulfillment-units` create units (internal)
+* `GET /fulfillment-units/{id}`
+* `POST /fulfillment-units/{id}/status` update lifecycle states
+
+**Storage**
+
+* Transactional DB keyed by `fulfillmentUnitId` and `orderId`.
+
+**Failure modes**
+
+* Duplicate unit creation: require idempotencyKey and dedup store.
+
+---
+
+## 3.3 Warehouse Management Adapter (WMS Connector)
+
+**Responsibilities**
+
+* Integrate with one or many WMS vendors (e.g., Manhattan, BlueYonder, Oracle WMS, Locus, custom) or internal warehouse systems.
+* Translate `pick`/`putaway`/`inventory`/`cycle-count` commands and ingest confirmations from WMS.
+* Manage multi-warehouse logic, slotting info, and putaway suggestions (or consume from Warehouse Optimization Service).
+
+**APIs / Integration**
+
+* `POST /wms/{warehouseId}/pick` create pick job
+* `POST /wms/{warehouseId}/confirm-pick` webhook
+* `GET /wms/{warehouseId}/inventory` sync
+
+**Design**
+
+* Implement per-WMS adapters with retry, idempotency, and message dedup. Use message queue for reliable delivery.
+
+**Failure modes**
+
+* WMS downtime: degrade to manual pick lists or fallback processes; queue tasks and reconcile when WMS back online.
+
+---
+
+## 3.4 Inventory Reservation & Allocation Service
+
+**Responsibilities**
+
+* Request inventory reservations and allocations across sources (warehouses, stores, 3PLs) in coordination with Inventory Core.
+* Support allocation strategies: nearest-first, cost-optimal, service-level (SLA commitments), expiration/lot-aware allocations.
+
+**APIs**
+
+* `POST /allocations` { fulfillmentUnitId, preferences }
+* `GET /allocations/{id}`
+* `POST /allocations/{id}/release`
+
+**Consistency**
+
+* Strong consistency required when reserving physical stock. Use CAS/locks or distributed transactions via saga pattern.
+
+**Failure modes**
+
+* Oversell due to race conditions: use optimistic locking and compensate via reallocation or backorder.
+
+---
+
+## 3.5 Carrier Integration & Rate Shopping Service
+
+**Responsibilities**
+
+* Query multiple carrier APIs and return ranked shipping options by cost, ETA, carbon impact, and SLA.
+* Maintain carrier credentials, service mappings, negotiated rates, and shipment constraints (weight, dims, zones).
+
+**APIs**
+
+* `POST /rates/quote` { origin, destination, parcels, options }
+* `POST /rates/quote/bulk` for multi-shipment scenarios
+
+**Design notes**
+
+* Cache rate responses with TTL and use precomputed negotiated-rate lookups for speed.
+* Support carrier-specific features: multi-package, pallet, LTL, customs forms.
+
+**Failure modes**
+
+* Carrier rate limit or outage: mark carrier unhealthy and fallback to default carriers or estimate using cached rules.
+
+---
+
+## 3.6 Shipping Rate & Pricing Service
+
+**Responsibilities**
+
+* Apply business rules to raw carrier rates: markup, discounts, flat fees, min/max, promo shipping rules, free-shipping thresholds.
+* Provide final shipping price visible at checkout and used for accounting.
+
+**APIs**
+
+* `POST /shipping/price` { rateQuote, promotionsContext }
+* `GET /shipping/price/{id}`
+
+**Storage**
+
+* Store rules and applied shipping charges per order for audit.
+
+**Failure modes**
+
+* Misconfigured markups causing revenue loss: provide dry-run and simulated billing in staging.
+
+---
+
+## 3.7 Label, Documentation & Compliance Service
+
+**Responsibilities**
+
+* Generate carrier-compliant shipping labels, customs documents (CN22/CN23), commercial invoices, packing slips, and dangerous goods declarations.
+* Handle multi-language and localization of paperwork.
+* Validate address and required documents per customs rules.
+
+**APIs**
+
+* `POST /labels` { shipmentId, parcels, options } → returns label PDF/ZPL/base64
+* `POST /documents/customs` → customs docs
+
+**Design**
+
+* Use modular templates per carrier; include printable and thermal label formats; provide brittle fallback formats.
+
+**Failure modes**
+
+* Label generation mismatches (dimensions/weights): reject booking and request re-weigh or re-pack.
+
+---
+
+## 3.8 Tracking & Events Aggregator Service
+
+**Responsibilities**
+
+* Ingest carrier tracking events via webhooks, polling, or EDI, normalize them to canonical `trackingEvent` schema, and enrich with order/fulfillment metadata.
+* Emit events to update order status, notify customers, and feed analytics.
+
+**APIs**
+
+* `POST /tracking/webhook/{carrier}` (ingest)
+* `GET /tracking/{trackingNumber}` → latest status
+
+**Design**
+
+* Deduplicate carrier events, maintain event timeline, and handle out-of-order events using event timestamps and sequence numbers.
+
+**Failure modes**
+
+* Missed events: detect via reconciliation with carrier manifests and re-poll as needed.
+
+---
+
+## 3.9 Manifesting, Batching & Run Generation Service
+
+**Responsibilities**
+
+* Batch shipments into daily manifests, trucks/runs, or carrier pickups. Create run sheets and route plans.
+* Support batch-level operations: combined labels, consolidated invoices, and manifest uploads to carrier portals or EDI endpoints.
+
+**APIs**
+
+* `POST /manifests` { shipmentIds }
+* `GET /manifests/{id}`
+
+**Considerations**
+
+* Integrate with carrier pickup scheduling and provide proof-of-pickup ingestion.
+
+---
+
+## 3.10 Pickup / Same-day / Local Delivery Service
+
+**Responsibilities**
+
+* Orchestrate same-day logistics, local courier assignments, in-store pickup scheduling, and click-and-collect workflows.
+* Manage real-time driver assignment, route optimization, ETA updates and proof-of-delivery collection (photo, signature).
+
+**APIs**
+
+* `POST /local-delivery/assign` { orderId, locationId }
+* `POST /local-delivery/{deliveryId}/status`
+
+**Integration**
+
+* Integrate with driver mobile apps and last-mile partners, provide SDK or webhook endpoints.
+
+---
+
+## 3.11 Returns & Reverse Logistics (RMA) Service
+
+**Responsibilities**
+
+* Provide return authorizations, generate return labels, track inbound return shipments, manage inspection outcomes and refund/replace workflows.
+* Support multi-return flows (drop-off, pickup, return to store, third-party returns).
+
+**APIs**
+
+* `POST /rma` { orderId, items, reason }
+* `GET /rma/{id}`
+* `POST /rma/{id}/receive` (receive and process return)
+
+**Design notes**
+
+* Integrate with WMS for QC and putaway; create disposition codes (resellable, refurbish, scrap) and route accordingly.
+
+**Failure modes**
+
+* Abuse/fraud in returns: integrate with fraud/risk service, require evidence for high-value returns.
+
+---
+
+## 3.12 Customs, Duties & International Clearance Service
+
+**Responsibilities**
+
+* Calculate duties/taxes, prepare customs declarations, classify HS codes, and handle EORI/VAT/Importer of Record specifics.
+* Integrate with 3rd-party clearance brokers and provide the required documents for cross-border shipments.
+
+**APIs**
+
+* `POST /customs/declaration` { shipmentId }
+* `GET /customs/{declarationId}/status`
+
+**Considerations**
+
+* Keep audit trail for customs; cache HS code decisions and evidence for audits.
+
+---
+
+## 3.13 Last Mile Orchestration & Delivery Partner API
+
+**Responsibilities**
+
+* Abstract diverse last-mile partners (post, parcel lockers, gig drivers) under unified APIs for booking, status, and proof-of-delivery.
+* Manage fallbacks and service level metrics by partner.
+
+**APIs**
+
+* `POST /lastmile/book` { shipmentId, constraints }
+* `GET /lastmile/{id}/eta`
+
+**Design**
+
+* Provide partner adapters and rate limiters; store partner SLAs and routing preferences.
+
+---
+
+## 3.14 Exceptions, Claims & Insurance Service
+
+**Responsibilities**
+
+* Manage incidents: lost/damaged shipments, claims processing, insured value handling and claim payouts.
+* Integrate with carrier claims APIs and insurance providers.
+
+**APIs**
+
+* `POST /claims` { shipmentId, evidence }
+* `GET /claims/{id}`
+
+**Considerations**
+
+* Keep immutable evidence storage (photos, POD) and timelines for dispute windows.
+
+---
+
+## 3.15 Slot Booking & Carrier Capacity Service
+
+**Responsibilities**
+
+* Coordinate carrier pickup slots, warehouse loading dock scheduling, and volume caps per carrier per day.
+* Provide quotas and booking APIs for carriers and warehouses.
+
+**APIs**
+
+* `POST /slots/book` { warehouseId, date, window }
+* `GET /slots/availability`
+
+**Failure modes**
+
+* Overbooking: implement soft-hold and eventual confirmation with expiry and retries.
+
+---
+
+## 3.16 Fulfillment Read Model / Query Service
+
+**Responsibilities**
+
+* Provide denormalized views of fulfillment state for storefront, customer service, and operations dashboards (order status, shipment ETA, exceptions, warehouse workload).
+
+**APIs**
+
+* `GET /fulfillment/read/orders/{orderId}`
+* `GET /fulfillment/read/shipments/{trackingNumber}`
+
+**Implementation**
+
+* Materialize from events into read-store (ElasticSearch, Redis, or Postgres) with documented eventual consistency.
+
+---
+
+## 3.17 Audit & Compliance Service (shipping records)
+
+**Responsibilities**
+
+* Store immutable shipment and customs records; provide exports for finance, customs audits, and compliance.
+* Provide WORM-like retention and tamper-evident logging where required.
+
+**APIs**
+
+* `GET /audit/shipments?from=&to=`
+
+---
+
+## 3.18 Sandbox / Carrier Test Harness
+
+**Responsibilities**
+
+* Emulate carrier APIs, allow simulation of events (delays, exceptions, deliveries), and provide testing endpoints for integrations.
+
+**APIs**
+
+* `POST /sandbox/carrier/simulate` { scenario }
+
+---
+
+## 3.19 Metrics & Telemetry Aggregator
+
+**Responsibilities**
+
+* Collect domain metrics: time to allocate, time to pick, label generation error rate, on-time delivery rate, exceptions per 1k shipments.
+* Power SLAs, SRE alerts and business dashboards.
+
+**Key metrics**
+
+* `fulfillment.time.to.ship.p95`, `shipments.on_time_rate`, `carrier.success_rate`, `labels.generation.failure_rate`
+
+---
+
+# 4. Cross-cutting patterns & architecture
+
+## Event-driven sagas & choreography
+
+* Favor event-driven choreography for simple flows (e.g., fulfillment-unit created → allocation → pick creation) and orchestrators for complex multi-step flows with compensations (fulfillment orchestrator).
+* Use durable workflow engines (Temporal, Cadence, or self-built saga state machine) where long-running state and retries are complex.
+
+## Idempotency & deduplication
+
+* All external-facing endpoints and event handlers must enforce idempotency using `idempotencyKey` or processed-event stores.
+* Persist processed webhook IDs from carriers to avoid duplicate processing.
+
+## Transactional guarantees & compensations
+
+* Maintain local transactions inside services; use sagas for cross-service coordination with explicit compensating actions (release allocation, cancel label, refund shipping charges).
+
+## Data partitioning & sharding
+
+* Partition by `warehouseId`, `merchantId`, or `geography` to localize hotspots (e.g., single busy warehouse). Store per-warehouse queues for WMS interactions.
+
+## Security & compliance
+
+* Protect carrier credentials in a secrets manager; use mTLS for carrier integrations where supported.
+* Protect PII in shipping addresses; ensure compliance with GDPR (data subject requests) and retention rules.
+
+## Observability & tracing
+
+* Trace every fulfillment flow with correlation IDs (orderId, fulfillmentId, shipmentId). Provide dashboards for SLA violations and root-cause analysis.
+
+# 5. Canonical data models
+
+**FulfillmentUnit**
+
+```json
+{
+  "fulfillmentUnitId": "fu-uuid",
+  "orderId": "ord-123",
+  "skuId": "SKU-1",
+  "quantity": 2,
+  "source": "WH-1",
+  "status": "allocated|picked|packed|shipped",
+  "assignedTo": "pickJob-uuid",
+  "lastUpdated": "2025-08-01T12:00:00Z"
+}
+```
+
+**Shipment**
+
+```json
+{
+  "shipmentId": "sh-uuid",
+  "orderId": "ord-123",
+  "carrier": "DHL",
+  "service": "express",
+  "parcels": [ { "parcelId":"p-1","weight":2.3,"dims":"10x8x6" } ],
+  "trackingNumber": "TRACK123",
+  "labelUrl": "https://.../label.pdf",
+  "status": "booked|in_transit|out_for_delivery|delivered|exception",
+  "estimatedDelivery": "2025-08-03T18:00:00Z"
+}
+```
+
+**Manifest**
+
+```json
+{
+  "manifestId": "m-uuid",
+  "carrier": "DHL",
+  "shipments": ["sh-uuid","sh-uuid2"],
+  "pickupWindow": { "from": "2025-08-01T16:00:00Z","to": "2025-08-01T18:00:00Z" },
+  "status": "created|uploaded|picked_up"
+}
+```
+
+# 6. API design guidelines & examples (REST + events)
+
+* Use semantic HTTP codes: `201` for created, `202` for accepted async, `409` for contention/optimistic lock, `400` for validation.
+* Provide `idempotencyKey` header for all mutating endpoints.
+* For async operations (label generation, booking), return `202 Accepted` with `Location` header to poll status.
+* Bulk endpoints for manifesting and rate shopping to reduce chattiness.
+
+**Example: Create shipment (simplified)**
+`POST /shipments`
+Body:
+
+```json
+{ "fulfillmentUnitIds": ["fu-1","fu-2"], "service":"standard", "packageHints": [{"weight":2.3}] }
+```
+
+Response: `202 Accepted` with `Location: /shipments/{jobId}`
+
+# 7. Events catalogue (topics, schemas, retention suggestions)
+
+* `fulfillment.unit.created`
+* `fulfillment.allocation.requested`
+* `fulfillment.allocation.succeeded`
+* `wms.pick.created` / `wms.pick.completed`
+* `shipment.booked` / `shipment.label.generated`
+* `tracking.event.received`
+* `manifest.uploaded` / `manifest.picked_up`
+* `rma.created` / `rma.received`
+
+**Retention**: Keep hot topics 7–30 days; archive to S3 for long-term audit retention (1–7 years depending on finance & customs rules).
+
+# 8. Observability, monitoring & alerting
+
+**Logs**
+
+* Structured logs with `traceId`, `orderId`, `fulfillmentId`, `shipmentId`, `service`, `env`.
+
+**Traces**
+
+* Instrument pick/pack/ship flows. Trace WMS call durations and carrier booking latency.
+
+**Metrics & Alerts**
+
+* Key alerts: `manifest.upload.failure_rate > threshold`, `carrier.booking.failure_rate`, `on_time_delivery_rate < SLO`, `tracking.event.lag > threshold`.
+
+# 9. Testing, QA & contract testing
+
+* Consumer-driven contract tests for WMS and carrier adapters.
+* Integration tests with carrier sandbox/harness to exercise label formats, EDI flows, and webhooks.
+* End-to-end test harness simulating orders through fulfillment and returns.
+* Load tests for manifesting and rate-shopping at peak volumes.
+
+# 10. CI/CD, deployment & scaling guidance
+
+* Independent deploys per adapter and stateless services; stateful services use managed DBs and partitioning.
+* Canary deployments for orchestrator changes and rate shopping algorithms.
+* Autoscale workers for batch jobs (manifesting, label generation) based on queue length.
+
+# 11. Operational runbook (common incidents & playbooks)
+
+**Incident: Carrier booking returned error for many shipments**
+
+* Identify affected shipments and carriers; mark carrier unhealthy; retry with backoff then attempt alternate carrier; notify ops & merchants.
+
+**Incident: WMS pick confirmations not arriving**
+
+* Check WMS adapter logs and connectivity; re-push pick jobs from queue; fallback to manual pick lists.
+
+**Incident: Tracking event gap (no updates)**
+
+* Re-poll carrier APIs for missed updates; raise incident if gap > SLA.
+
+**Incident: Customs hold**
+
+* Notify customer and ops; surface required documentation; coordinate with customs broker.
+
+# 12. Capacity planning and cost considerations
+
+* Size label/document generation (CPU, memory) and rate-shopping caches for low latency.
+* Bandwidth and storage for label PDFs and proof-of-delivery images.
+* Costs for EDI/AS2 connections and managed carrier integrations.
+
+# 13. Migration & backward compatibility strategy
+
+* Use event schema registry for shipping events; support consumer-driven compatibility.
+* Dual-write during adapter migration and backfill historical shipments where needed.
+
+# Analytics Microservices Catalog
+
+*Comprehensive catalog of microservices, APIs, events, data models, integration patterns, non-functional requirements, operational runbooks, and deployment guidance for an eCommerce Analytics platform.*
+
+---
+
+## Table of Contents
+
+1. Overview & goals
+2. High-level domain model
+3. Microservice catalog (detailed)
+
+   * 3.1 Event Ingest / Collector Service
+   * 3.2 Schema Registry & Contract Service
+   * 3.3 Raw Event Store (Immutable Log)
+   * 3.4 Stream Processing & Enrichment Service
+   * 3.5 Metrics Aggregator / Time-series Service
+   * 3.6 OLAP Warehouse ETL / Batch Loader
+   * 3.7 Data Lake / Archival Service
+   * 3.8 Identity Resolution / Customer 360 Service
+   * 3.9 Feature Store (Online + Offline)
+   * 3.10 Model Training Platform (ML pipelines)
+   * 3.11 Feature Serving & Real-time Scoring Service
+   * 3.12 Experimentation & A/B Testing Service
+   * 3.13 Attribution & Marketing Analytics Service
+   * 3.14 Funnel, Cohort & Retention Service
+   * 3.15 Reporting & BI API / Dashboard Service
+   * 3.16 Data Catalog, Lineage & Governance Service
+   * 3.17 Data Quality & Validation Service
+   * 3.18 Anomaly Detection & Alerting Service
+   * 3.19 Data Export / Third-party Connectors
+   * 3.20 Privacy, Consent & Subject Access Service
+   * 3.21 Access Control & Audit Service
+   * 3.22 Sandbox & Test Data Service
+   * 3.23 Observability & Telemetry Aggregator
+4. Cross-cutting patterns & architecture
+
+   * event-first design
+   * storage & compute tiers
+   * consistency models
+   * data contracts & schema evolution
+   * idempotency & exactly-once considerations
+   * security & privacy
+5. Canonical data models & sample schemas
+6. APIs & example flows (ingest → metric → dashboard)
+7. Events catalogue (topics, schemas, retention guidance)
+8. Observability, monitoring & alerting
+9. Testing, QA & contract testing
+10. CI/CD, deployment & scaling guidance
+11. Operational runbook (common incidents & playbooks)
+12. Capacity planning and cost considerations
+13. Migration & backward compatibility strategy
+14. Appendix: sample SQL, example Kafka topics, glossary
+
+---
+
+# 1. Overview & goals
+
+**Mission:** Provide a unified, scalable analytics platform that collects high-fidelity events from eCommerce systems (web, mobile, backend), transforms and enriches them, stores them for real-time and batch analytics, supports ML lifecycle, enables self-serve BI, enforces governance and privacy, and delivers alerts and insights to business and SRE teams.
+
+**Top-level goals**
+
+* **Reliability & durability:** event ingestion with lossless delivery (at-least-once or exactly-once where feasible)
+* **Low-latency insights:** support real-time metrics, personalization and fraud signals (sub-second to seconds)
+* **Large-scale analytics:** petabyte-scale raw event retention with cost-effective archival
+* **Reproducibility & audit:** immutable raw event log, schema registry, and lineage for reproducible analytics
+* **Privacy & compliance:** enforce GDPR/CCPA/PDPA controls, subject access and deletion
+* **Self-serve:** BI APIs, catalog, and sandbox for analysts and data scientists
+
+# 2. High-level domain model
+
+Core concepts:
+
+* **Event** — atomic typed event (e.g., `page.view`, `cart.item.added`, `order.placed`, `shipment.delivered`)
+* **RawEvent** — immutable raw payload with ingestion metadata
+* **EnrichedEvent** — raw event augmented (user profile, geo, device, campaign)
+* **Metric** — time-series aggregate (count, sum, gauge, histogram)
+* **Dimension** — attribute to slice metrics (country, channel, sku)
+* **Feature** — ML feature derived from event or historical aggregates
+* **Model** — trained ML artifact with metadata, versioning
+* **Dataset / Table** — materialized dataset in OLAP (daily partitions etc.)
+
+# 3. Microservice catalog (detailed)
+
+> Each microservice lists responsibilities, key APIs, event contracts, storage choices, partitioning keys, consistency model, SLA targets, scaling strategy and failure modes.
+
+---
+
+## 3.1 Event Ingest / Collector Service
+
+**Responsibilities**
+
+* Expose high-throughput endpoints and SDKs to capture events (HTTP POST / gRPC / SDKs for web/mobile)
+* Validate events against schema registry, add ingestion metadata (`ingestTs`, `source`, `traceId`), forward to Raw Event Store
+* Provide buffering, batching, backpressure handling and client-side retry guidance
+
+**APIs**
+
+* `POST /ingest/batch` — accept batch of events
+* `GET /ingest/health` — health and backpressure signals
+
+**Storage / forwarding**
+
+* Publish to immutable append-only streaming system (Kafka, Kinesis, Pulsar) or message queue; optionally persist to short-term cache for replay
+
+**Partitioning**
+
+* Partition by `customerId` or `userId` or hashed `eventId` depending on access patterns; allow routing to tenant-specific topics for multi-tenant.
+
+**Consistency/SLA**
+
+* At-least-once delivery; aim for p99 ingestion latency < 200ms; retry and dead-letter for malformed events.
+
+**Failure modes**
+
+* Downstream lag/backpressure: provide `429` and circuit-breaker patterns; temporarily buffer to durable store for replay.
+
+---
+
+## 3.2 Schema Registry & Contract Service
+
+**Responsibilities**
+
+* Store and enforce event schemas (Avro/JSON Schema/Protobuf) and versioning rules
+* Provide compatibility checks, UI for schema evolution, and programmatic validation APIs
+* Serve as the source of truth for data contracts between producers and consumers
+
+**APIs**
+
+* `POST /schemas` — register schema
+* `GET /schemas/{subject}/versions`
+* `POST /schemas/validate` — validate payload
+
+**Design notes**
+
+* Enforce backward/forward compatibility policies; integrate with CI to gate deployments.
+
+---
+
+## 3.3 Raw Event Store (Immutable Log)
+
+**Responsibilities**
+
+* Durable append-only store for raw events with retention and archival policies
+* Provide consumer offsets, replay from offsets/time ranges, and compacted topics for dedup keys
+
+**Storage choices**
+
+* Kafka (hot), tiered to S3/Cloud Storage for long-term archival; or use time-partitioned object storage with manifest indices
+
+**APIs**
+
+* `GET /raw/events?from=&to=&topic=` — admin replay
+
+**SLA**
+
+* High durability; zero data loss guarantee under normal operation.
+
+---
+
+## 3.4 Stream Processing & Enrichment Service
+
+**Responsibilities**
+
+* Consume raw events, perform validation, transformations, joins (e.g., enrich with profile/geo/campaign), compute sessionization, dedupe, and write enriched events and feature pre-aggregates
+* Support both stateless transforms (map/filter) and stateful operations (windowed aggregations, session windows)
+
+**Platforms**
+
+* Flink/Beam/ksqlDB/Kafka Streams/Temporal for stateful streaming
+
+**Outputs**
+
+* Enriched events (to `enriched` topics), real-time metrics, and feature materialization (to Feature Store and Metrics Aggregator)
+
+**Failure modes**
+
+* State checkpoint loss: rely on durable state backends (RocksDB + changelog topics) and fast recovery.
+
+---
+
+## 3.5 Metrics Aggregator / Time-series Service
+
+**Responsibilities**
+
+* Real-time aggregation for counters/gauges/histograms with labels/dimensions, flush to time-series DB (Prometheus, InfluxDB, M3) and materialize aggregates for dashboards
+* Provide rollups (1m, 5m, 1h) and ad-hoc aggregation APIs
+
+**APIs**
+
+* `POST /metrics/ingest` — from stream processors
+* `GET /metrics/query` — time-series queries
+
+**SLAs**
+
+* Sub-second to seconds for near real-time metrics; p95 query latencies < 200ms for common queries.
+
+---
+
+## 3.6 OLAP Warehouse ETL / Batch Loader
+
+**Responsibilities**
+
+* Batch transform enriched events into partitioned analytical tables (orders, sessions, clicks, carts, shipments)
+* Schedule daily/hourly jobs, perform joins and denormalization, maintain slowly changing dimensions
+* Ensure reproducible pipelines with DAGs (Airflow, Dagster)
+
+**Storage choices**
+
+* BigQuery, Snowflake, Redshift, ClickHouse, or Delta Lake on S3
+
+**Features**
+
+* Partition pruning, incremental loads (CDC), materialized views
+
+---
+
+## 3.7 Data Lake / Archival Service
+
+**Responsibilities**
+
+* Tiered storage for raw and enriched events (cold archives), year(s)-long retention, secure access and lifecycle rules
+* Provide indexed object manifests for efficient queries (e.g., Athena/Presto, Iceberg/Hudi/Delta)
+
+**Policies**
+
+* Hot (30d) in warehouse, warm (90–365d) in S3 with Parquet, cold (archive) beyond that with lower cost class
+
+---
+
+## 3.8 Identity Resolution / Customer 360 Service
+
+**Responsibilities**
+
+* Build deterministic + probabilistic identity graphs (device IDs, email, login, cookies) to map events to unified profiles
+* Keep merge history, consent flags, and canonical identifiers (customerId)
+
+**APIs**
+
+* `POST /identity/merge` — merge profiles
+* `GET /identity/{customerId}` — profile and linked identifiers
+
+**Design notes**
+
+* Maintain lineage of merges for reversibility and auditability
+
+---
+
+## 3.9 Feature Store (Online + Offline)
+
+**Responsibilities**
+
+* Store and serve features for ML training (offline) and low-latency feature lookups in production (online)
+* Ensure feature consistency between training and serving
+
+**Platforms**
+
+* Feast, Hopsworks, or custom store (Redis + Parquet tables)
+
+**APIs**
+
+* `GET /features/online?keys=`
+* `BATCH /features/offline/query` for training data
+
+---
+
+## 3.10 Model Training Platform (ML pipelines)
+
+**Responsibilities**
+
+* Orchestrate model training pipelines (data extraction, featurization, training, validation, packaging), track experiments and model lineage
+* Integrate with feature store and data lake, support autoscaling training infra (K8s, GPUs)
+
+**Tools**
+
+* Kubeflow, MLflow, SageMaker, Airflow/Dagster for jobs
+
+---
+
+## 3.11 Feature Serving & Real-time Scoring Service
+
+**Responsibilities**
+
+* Serve models for real-time scoring (recommendations, fraud scores, personalization) with low latency and autoscaling
+* Log inputs & predictions for drift monitoring and auditing
+
+**APIs**
+
+* `POST /score` { modelId, features }
+* `GET /models/{modelId}/metrics`
+
+---
+
+## 3.12 Experimentation & A/B Testing Service
+
+**Responsibilities**
+
+* Manage experiments (assignment, bucketing, exposure event capture), power statistical analysis, and publish experiment results
+* Integrate with feature flags and rollout mechanisms
+
+**APIs**
+
+* `POST /experiments` create, `GET /experiments/{id}/assign` to determine bucket
+* `POST /experiments/{id}/exposure` ingest exposure events
+
+---
+
+## 3.13 Attribution & Marketing Analytics Service
+
+**Responsibilities**
+
+* Attribution models (last-click, multi-touch, data-driven), campaign performance metrics, LTV calculations and cohort-level ROI
+* Join marketing data (UTM, impressions) with conversion events
+
+**APIs**
+
+* `POST /attribution/run` (batch), `GET /attribution/report`
+
+---
+
+## 3.14 Funnel, Cohort & Retention Service
+
+**Responsibilities**
+
+* Compute funnel conversion rates, step drop-offs, cohort retention curves, customer lifetime metrics and RFM segmentation
+* Provide interactive APIs for analysts for ad-hoc funnel definitions
+
+**APIs**
+
+* `POST /funnels/compute` with definition, `GET /cohorts/{id}/retention`
+
+---
+
+## 3.15 Reporting & BI API / Dashboard Service
+
+**Responsibilities**
+
+* Serve cleaned, aggregated metrics and dimension tables to BI tools and consumer apps
+* Provide role-based dashboards (executive, product, ops) and embed APIs (SDK for embedding charts)
+
+**Integrations**
+
+* Support Looker, Metabase, Superset, Tableau connectors; REST/SQL endpoints and cached dashboards
+
+---
+
+## 3.16 Data Catalog, Lineage & Governance Service
+
+**Responsibilities**
+
+* Catalog datasets, schemas, owners, SLAs, and data lineage (provenance), expose search and data access requests
+* Integrate with data quality and compliance
+
+**Tools**
+
+* Amundsen, Datahub, Collibra
+
+---
+
+## 3.17 Data Quality & Validation Service
+
+**Responsibilities**
+
+* Define validation rules (schema, cardinality, null rates, drift), run checks in streaming and batch, surface anomalies and enforce SLAs
+* Auto-block pipeline if critical thresholds fail (with manual override)
+
+**APIs**
+
+* `POST /dq/check` run rule, `GET /dq/report`
+
+---
+
+## 3.18 Anomaly Detection & Alerting Service
+
+**Responsibilities**
+
+* Detect anomalies in metrics (sudden drop in orders, spike in returns), support rule-based and ML-based detectors, and route alerts to PagerDuty/Slack/email
+
+**APIs**
+
+* `POST /alerts/subscribe`, `POST /alerts/evaluate` (ingest metric)
+
+---
+
+## 3.19 Data Export / Third-party Connectors
+
+**Responsibilities**
+
+* Export cleansed datasets to external analytics systems, ad platforms (DSP, Google Ads), CRM, and BI warehouses
+* Support streaming and batch exports with retries and backpressure
+
+**APIs**
+
+* `POST /export/create`, `GET /export/status`
+
+---
+
+## 3.20 Privacy, Consent & Subject Access Service
+
+**Responsibilities**
+
+* Manage consent flags, data subject requests (export, delete), pseudonymization, and data retention enforcement
+* Provide API for other services to check consent before using PII
+
+**APIs**
+
+* `GET /consent/{userId}`, `POST /dsr/export`, `POST /dsr/delete`
+
+---
+
+## 3.21 Access Control & Audit Service
+
+**Responsibilities**
+
+* Fine-grained RBAC for data access, data masking based on roles, and immutable audit logs for data access and modifications
+
+---
+
+## 3.22 Sandbox & Test Data Service
+
+**Responsibilities**
+
+* Provide synthetic / anonymized datasets for analyst sandboxing and ML experimentation; manage obfuscation and utility vs privacy tradeoffs
+
+---
+
+## 3.23 Observability & Telemetry Aggregator
+
+**Responsibilities**
+
+* Collect platform health metrics, pipeline lags, consumer offsets, job failures, and provide dashboards for SRE and data teams
+
+---
+
+# 4. Cross-cutting patterns & architecture
+
+## Event-first design
+
+* Source-of-truth: raw event log. All downstream datasets are derived and reproducible from raw events; use immutable logs + schema registry.
+
+## Storage & compute tiers
+
+* Hot real-time: stream processors, feature store online, metrics system
+* Warm analytical: OLAP warehouse for daily/real-time queries
+* Cold: data lake (Parquet/ORC) for long-term retention and replays
+
+## Consistency models
+
+* At-least-once ingestion with idempotent consumers; exactly-once semantics for critical aggregates where supported (e.g., Kafka + transactional writes / Flink checkpoints).
+
+## Data contracts & schema evolution
+
+* Use schema registry and CI checks to prevent breaking producers; require consumer compatibility testing for changes.
+
+## Idempotency & deduplication
+
+* Include `eventId` and deduplication window in ingestion; use compacted keys for dedup topics.
+
+## Security & privacy
+
+* Encrypt data in transit and at rest; segregate PII; implement access controls; rotate keys regularly.
+
+# 5. Canonical data models & sample schemas
+
+**RawEvent**
+
+```json
+{ "eventId": "uuid", "type": "page.view", "timestamp": "...", "payload": { ... }, "ingestTs": "...", "source": "web" }
+```
+
+**OrderFact (OLAP)**
+
+```sql
+order_id STRING,
+user_id STRING,
+order_ts TIMESTAMP,
+total_amount DECIMAL,
+currency STRING,
+channel STRING,
+items ARRAY<STRUCT<sku STRING, qty INT, price DECIMAL>>
+```
+
+**Metric (time-series)**
+
+```json
+{ "metric": "orders.count", "ts": "2025-08-01T12:00:00Z", "value": 123, "tags": { "country":"GB","channel":"web" } }
+```
+
+# 6. APIs & example flows (ingest → metric → dashboard)
+
+1. Frontend SDK calls Event Ingest `POST /ingest/batch` with `order.placed` event.
+2. Raw Event Store persists event; Stream Processor enriches event (adds `customerId` via Identity service) and emits to `enriched` topic.
+3. Stream Processor updates Metrics Aggregator for `orders.count` and writes denormalized `order` record to `orders` warehouse staging.
+4. ETL job picks daily staging and writes partitioned `orders_fact` table in the OLAP warehouse.
+5. BI Dashboard queries `orders_fact` and the Metrics API for real-time KPIs.
+
+# 7. Events catalogue (topics, schemas, retention guidance)
+
+* `events.raw.{tenant}` — raw events, retention 30d hot then archive
+* `events.enriched.{tenant}` — enriched events for downstream
+* `metrics.` — metric ingestion topics
+* `features.offline`, `features.online` — feature topics
+
+**Retention guidance**
+
+* Hot topics: 7–30 days depending on replay needs; archive raw events to S3 for 1–7+ years depending on compliance.
+
+# 8. Observability, monitoring & alerting
+
+**Key metrics**
+
+* Ingest TPS, p95 ingest latency, consumer lag (offsets), ETL job success rate, model training failures, data quality rule violations
+
+**Alerts**
+
+* Consumer lag > threshold, DAG failure, schema validation failure, sudden drop in event volume (>30% vs baseline), model drift alarms
+
+# 9. Testing, QA & contract testing
+
+* Producer/consumer contract tests via schema registry + Pact-like tests
+* Integration tests using sandbox harness and replayable event fixtures
+* Unit + regression tests for transformation logic; data quality unit tests
+
+# 10. CI/CD, deployment & scaling guidance
+
+* Treat pipeline code as deployable services. Use feature flags for new data pipelines and shadow runs for validating before switching production
+* Autoscale stream processing based on lag and throughput
+* Separate infra for training workloads (GPU clusters)
+
+# 11. Operational runbook (common incidents & playbooks)
+
+**Incident: sudden drop in incoming events**
+
+* Check collector health & ingestion endpoints; check CDN/SDK release; check front-end errors; verify schema changes causing rejections
+
+**Incident: consumer lag increases**
+
+* Increase consumer parallelism, check state backend, scale streaming cluster, inspect slow downstream sinks
+
+**Incident: data quality failure (nulls or spikes)**
+
+* Identify offending producer, quarantine problematic topic, backfill corrected data from archive, notify data owners
+
+# 12. Capacity planning and cost considerations
+
+* Estimate event TPS and avg event size to size Kafka + storage. Use Parquet + columnar compression to reduce OLAP costs.
+* Balance hot retention (costly) vs recovery needs. Cold-archive in Glacier / Cold storage for long-term.
+* Training GPU costs vs model retraining frequency.

@@ -1,0 +1,410 @@
+# Workflow & Approval Service — REST API endpoints
+
+Nice — here’s a focused, production-ready REST surface for a **Workflow & Approval Service**. This service owns workflow templates, workflow instances (running processes), tasks, approvals, escalations, SLAs, audit trails, and integrations (webhooks/notifications). It **does not** store the business data the workflows operate on (products, orders, content, etc.) — it references resources by `resource_type` + `resource_id` and coordinates approvals and state transitions.
+
+Base path: `/api/v1` (adjust as needed). Most resources are store-scoped or org-scoped — I show both patterns (use whichever fits your tenancy model): `/api/v1/stores/{storeId}/...` or `/api/v1/workflows/...` for global/tenant-neutral endpoints. Common auth scopes: `workflow:read`, `workflow:write`, `workflow:execute`, `workflow:admin`, `workflow:approve`. All list endpoints support `page`/`per_page` or cursor pagination and `sort`.
+
+---
+
+## Concepts (quick)
+
+* **Workflow Template** — reusable definition (states, transitions, tasks, approvals, conditions, timers, scripts). Versioned.
+* **Workflow Instance** — a running execution of a template, attached to a business resource (e.g., `product:1234`).
+* **Task** — unit of work assigned to user(s)/group(s)/roles inside an instance (review, edit, verify).
+* **Approval** — explicit accept/reject actions; may be single or multi-step (parallel/sequential) with quorum rules.
+* **Transition** — move instance to another state (may be guarded by conditions / approvals).
+* **SLA / Escalation** — timers that trigger reminders, reassignments, or automatic decisions.
+* **Action / Script / Hook** — automated steps executed by engine (e.g., call Pricing service, add tag).
+* **Audit** — immutable log of all events, transitions, and decisions.
+
+---
+
+# Endpoints
+
+### Top-level workflow template management
+
+Manage definitions used to create instances.
+
+* `POST /stores/{storeId}/workflow-templates`
+  Create workflow template. Body: `{key, name, description, version, definition:{states, transitions, tasks, approvals, timers, conditions, context_schema}, metadata}`.
+  Auth: `workflow:admin`
+  Returns `201` with `template_id` and `version_id`.
+
+* `GET /stores/{storeId}/workflow-templates`
+  List templates. Query: `q`, `active`, `resource_type` (what resource types this template can be attached to), `page`.
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/workflow-templates/{templateId}`
+  Get template (optionally `?version=...` to fetch specific version). Response includes definition and UI hints.
+  Auth: `workflow:read`
+
+* `PATCH /stores/{storeId}/workflow-templates/{templateId}`
+  Partial update (metadata, description). Structural changes should create a new version.
+  Auth: `workflow:admin`
+
+* `POST /stores/{storeId}/workflow-templates/{templateId}/versions`
+  Create a new version (copy + edit). Body: `{definition, notes}`. Returns new `version_id`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/workflow-templates/{templateId}/versions`
+  List versions and diffs.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/workflow-templates/{templateId}/activate`
+  Activate a version for use. Body: `{version_id, scope:{channels,product_types,...}}`.
+  Auth: `workflow:admin`
+
+* `DELETE /stores/{storeId}/workflow-templates/{templateId}`
+  Soft-delete/deprecate template (block new instances). `?force=true` for permanent delete (validate no running instances).
+  Auth: `workflow:admin`
+
+* `POST /stores/{storeId}/workflow-templates/import` / `GET /stores/{storeId}/workflow-templates/import/{jobId}`
+  Import templates (JSON/YAML/zip), returns `job_id`.
+  Auth: `workflow:admin`
+
+* `POST /stores/{storeId}/workflow-templates/export`
+  Export templates (filters), returns `export_job_id`/signed link.
+  Auth: `workflow:read`
+
+---
+
+### Template simulation / dry-run
+
+Help safe changes.
+
+* `POST /stores/{storeId}/workflow-templates/{templateId}/simulate`
+  Simulate template on an example resource. Body: `{version_id, context:{...}, simulate_paths:true}`. Returns predicted task list, approvals required, timing, and warnings about missing role mappings.
+  Auth: `workflow:admin` or `workflow:read`
+
+---
+
+### Template mappings (which templates apply to which resources)
+
+Attach templates to resource types or specific resources.
+
+* `POST /stores/{storeId}/workflow-templates/{templateId}/mappings`
+  Map template to `resource_type` (e.g., `product`, `content`) and optional selectors (`product_type:apparel`, channels). Body: `{resource_type, selector, priority}`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/workflow-templates/mappings?resource_type=product&selector=...`
+  List mappings and effective template for a given resource.
+  Auth: `workflow:read`
+
+* `DELETE /stores/{storeId}/workflow-templates/mappings/{mappingId}`
+  Remove mapping.
+  Auth: `workflow:admin`
+
+---
+
+### Start / stop workflow instances
+
+Create and control instances attached to business resources.
+
+* `POST /stores/{storeId}/workflow-instances`
+  Start a workflow instance. Body: `{template_id, version_id, resource_type, resource_id, initiated_by:user_id, context:{...}, initial_inputs:{...}}`. Returns `201` with `instance_id`.
+  Auth: `workflow:execute` (or `workflow:write`)
+
+* `GET /stores/{storeId}/workflow-instances`
+  List instances. Filters: `template_id`, `resource_type`, `resource_id`, `status` (`running|completed|cancelled|failed`), `initiated_by`, `assigned_to`, `created_after`.
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/workflow-instances/{instanceId}`
+  Get instance state, current tasks, history, context, variables, timers, and pending approvals. Option: `?include=tasks,history,context`.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/cancel`
+  Cancel instance (with reason). Optional: `?force=true` to override running automatic tasks.
+  Auth: `workflow:admin` or owner.
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/pause` / `/resume`
+  Pause or resume instance execution (useful for maintenance or manual hold).
+  Auth: `workflow:admin`
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/snapshot`
+  Create a snapshot of instance (immutable) for audit or rollback. Returns `snapshot_id`.
+  Auth: `workflow:admin`
+
+---
+
+### Tasks (user-facing work items)
+
+Tasks created by the engine requiring human (or system) action.
+
+* `GET /stores/{storeId}/tasks`
+  Global task list for admins. Query/filter by `status`, `assigned_to`, `assigned_group`, `due_before`, `priority`.
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/users/{userId}/tasks`
+  User inbox / assigned tasks. Query: `status=open|claimed|completed`, `page`.
+  Auth: `workflow:read` (users can only view their own tasks unless admin)
+
+* `POST /stores/{storeId}/tasks/{taskId}/claim`
+  Claim a task (assign to current user). Returns updated task.
+  Auth: `workflow:execute`
+
+* `POST /stores/{storeId}/tasks/{taskId}/unclaim`
+  Release claim.
+  Auth: `workflow:execute`
+
+* `POST /stores/{storeId}/tasks/{taskId}/complete`
+  Complete a task. Body: `{action:"approve"| "reject" | "comment" | "complete_custom_action", payload:{...}}`. Returns resulting transitions (next tasks) or `instance_id` state. Support `If-Match` for optimistic concurrency.
+  Auth: `workflow:execute` (or `workflow:approve` for approval tasks)
+
+* `POST /stores/{storeId}/tasks/{taskId}/delegate`
+  Delegate task to another user/group. Body: `{assignee_user_id|group_id, note}`.
+  Auth: `workflow:execute`
+
+* `POST /stores/{storeId}/tasks/{taskId}/reassign`
+  Reassign task (admin only).
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/tasks/{taskId}`
+  Get task details: instructions, attachments, context, due date, candidate users/groups, history/comments.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/tasks/{taskId}/comment`
+  Add comment to task (threaded). Body: `{author_id, text, attachments[]}`.
+  Auth: `workflow:execute`
+
+* `GET /stores/{storeId}/tasks/{taskId}/history`
+  Task history and audit (claims, completions, timers fired).
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/tasks/bulk/claim` / `/bulk/complete`
+  Bulk operations for UI power users; returns `job_id`.
+  Auth: `workflow:execute`
+
+---
+
+### Approvals (structured accept/reject flows)
+
+Approval objects with multi-step rules, quorum, parallel/sequential, and audit.
+
+* `POST /stores/{storeId}/approval-requests`
+  Create an approval request standalone or bound to an instance/task. Body: `{instance_id?, task_id?, resource_type, resource_id, requested_by, approvers:[{user_id|group_id}], mode: "unanimous|any|majority|sequential", deadline, context}`. Returns `approval_id`.
+  Auth: `workflow:write`
+
+* `GET /stores/{storeId}/approval-requests`
+  List approvals by status, approver, resource. Filters: `status=open|approved|rejected|expired`, `approver_id`.
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/approval-requests/{approvalId}`
+  Approval detail: required approvers, responses, quorum status, history.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/approval-requests/{approvalId}/respond`
+  Approver response. Body: `{approver_id, action: "approve"|"reject"|"abstain", note, attachments[]}`. Returns updated approval status and any effected transitions. Support `If-Match`.
+  Auth: `workflow:approve` (or role-bound)
+
+* `POST /stores/{storeId}/approval-requests/{approvalId}/delegate`
+  Delegate approval to another approver.
+  Auth: `workflow:approve`
+
+* `POST /stores/{storeId}/approval-requests/{approvalId}/cancel`
+  Cancel request (initiator or admin).
+  Auth: `workflow:write` or `workflow:admin`
+
+* `GET /stores/{storeId}/approval-requests/{approvalId}/audit`
+  Approval audit trail.
+  Auth: `workflow:read`
+
+---
+
+### Transitions & Conditional Logic
+
+Transitions are triggered by tasks/approvals or automatically.
+
+* `GET /stores/{storeId}/workflow-instances/{instanceId}/available-transitions`
+  Returns transitions available from current state with preconditions and required approvals.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/transitions/{transitionId}/execute`
+  Execute transition (optionally supplying `payload` and `actor_id`). Validate guard conditions; returns new state and created tasks.
+  Auth: `workflow:execute` (or `workflow:admin` for forced transitions)
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/evaluate-condition`
+  Evaluate a boolean condition expression against instance context for UI preview. Body: `{condition_expression, context_override}`. Returns boolean + debug info.
+  Auth: `workflow:read`
+
+---
+
+### Timers, SLAs & Escalations
+
+Timers that create reminders, reassign tasks, or auto-resolve after deadline.
+
+* `GET /stores/{storeId}/workflow-instances/{instanceId}/timers`
+  List active timers and scheduled SLA events.
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/timers/{timerId}/snooze`
+  Snooze or reschedule a timer. Body: `{new_due_at, reason}`.
+  Auth: `workflow:admin` or owner
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/timers/{timerId}/trigger`
+  Manually trigger SLA action (for testing or remediation).
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/escalation-rules`
+  List escalation rules (who to notify/reassign on missed SLA).
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/escalation-rules` / `PATCH` / `DELETE`
+  CRUD for escalation rules.
+  Auth: `workflow:admin`
+
+---
+
+### Notifications / Reminders
+
+Service to push notifications (email, in-app, slack) triggered by workflow events. (Can integrate with Notification Service.)
+
+* `POST /stores/{storeId}/notifications`
+  Enqueue a notification (used by workflow engine). Body: `{type, recipients:[user_id|group_id], subject, body, channel:"email|inapp|slack", metadata}`. Returns `notification_id`.
+  Auth: `workflow:write`
+
+* `GET /stores/{storeId}/notifications/{notificationId}/status`
+  Delivery & retry status.
+  Auth: `workflow:read`
+
+---
+
+### Roles, Groups & Approver Pools
+
+Manage who can be assigned or is eligible to approve.
+
+* `GET /stores/{storeId}/approver-pools`
+  Return groups/roles used in templates (`role:editor`, `group:category-managers`).
+  Auth: `workflow:read`
+
+* `POST /stores/{storeId}/approver-pools` / `PATCH` / `DELETE`
+  Manage approver pools (map to user\_ids, group\_ids, or LDAP/SSO groups).
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/approver-pools/{poolId}/candidates`
+  List eligible users for pool, with availability statuses.
+  Auth: `workflow:read`
+
+---
+
+### Webhooks & Integrations
+
+Let external services react to workflow events and send events into the engine.
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook for workflow events. Body: `{url, events:[instance.started,task.created,approval.requested,approval.completed,instance.completed], secret, active, filters}`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/webhooks` / `PATCH` / `DELETE` / `GET /{webhookId}/deliveries`
+  Manage webhooks & delivery logs.
+  Auth: `workflow:admin`
+
+* `POST /stores/{storeId}/integrations/{integrationId}/inbound-event`
+  Inbound webhook endpoint for external triggers to start/signal workflows. Body: `{signature, event_type, payload}`. Authentication/validation required.
+  Auth: integration key
+
+---
+
+### Audit Logs & History
+
+Complete, immutable audit trail.
+
+* `GET /stores/{storeId}/audit-logs`
+  Global audit logs. Filters: `actor_id`, `resource_type`, `action`, `since`, `until`, `instance_id`. Cursor-based pagination.
+  Auth: `workflow:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/workflow-instances/{instanceId}/audit`
+  Detailed instance-level event log (transitions, task events, approvals).
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/tasks/{taskId}/audit`
+  Task audit.
+  Auth: `workflow:read`
+
+---
+
+### Metrics, Diagnostics & Reporting
+
+Operational insights and SLAs.
+
+* `GET /stores/{storeId}/workflow-metrics`
+  High level metrics: `avg_time_to_approve`, `tasks_open`, `overdue_tasks`, `instances_started`, `instances_completed`, broken down by template. Query: `since`, `until`, `template_id`.
+  Auth: `workflow:admin` or `analytics:read`
+
+* `GET /stores/{storeId}/workflow-metrics/export`
+  Export metric CSV/JSON for BI. Returns `job_id`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/diagnostics`
+  Health: queue lengths, failed jobs, timer lag, worker pool.
+  Auth: `workflow:admin`
+
+---
+
+### Search & Query helpers
+
+Find tasks, instances, and approvals quickly.
+
+* `GET /stores/{storeId}/search`
+  Cross-resource search: `q`, `types=instances,tasks,approvals`, filters and facets.
+  Auth: `workflow:read`
+
+* `GET /stores/{storeId}/users/{userId}/workload`
+  Returns assigned open tasks, SLA exposures, and suggested reassignments.
+  Auth: user or `workflow:admin`
+
+---
+
+### Bulk / Async jobs
+
+Large scale operations return job ids.
+
+* `POST /stores/{storeId}/workflow-instances/bulk-start`
+  Start many instances (CSV/JSON). Body: list of `{resource_type,resource_id,template_id}`. Returns `job_id`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/jobs/{jobId}`
+  Generic job status: `{job_id,status,progress,errors,result_url}`.
+  Auth: `workflow:read`
+
+---
+
+### Security & Governance endpoints
+
+Locking, approvals audit, export of decisions for compliance.
+
+* `POST /stores/{storeId}/workflow-instances/{instanceId}/lock` / `/unlock`
+  Administrative lock to prevent transition or edits. Body: `{reason,expires_at}`.
+  Auth: `workflow:admin`
+
+* `GET /stores/{storeId}/decision-exports`
+  Export decisions/approvals for compliance (filters by date/template). Returns `export_job_id`.
+  Auth: `compliance:read` or `workflow:admin`
+
+---
+
+## Cross-cutting considerations / best practices
+
+* **Resource reference only**: workflows reference business objects by `resource_type` + `resource_id`. They must never duplicate authoritative business data (price, stock).
+* **Versioning**: templates are versioned. Instances capture the template `version_id` used at start so instance behavior is stable.
+* **Idempotency & concurrency**: use idempotency tokens for `start` and `complete` endpoints; support `ETag` / `If-Match` on task/instance updates.
+* **Auditable immutable logs**: every decision, transition, and timer event is logged immutably with `actor_id`, timestamp, inputs, and diffs.
+* **Role & scope integration**: integrate with your User/Groups/SSO service to resolve approver pools and role-based assignment.
+* **Flexible approver rules**: support parallel/sequential approvals, quorum rules, conditional approvals, and delegations.
+* **SLA & Escalation**: timers should be resilient (persisted durable timers) and have configurable escalation actions (notify, reassign, auto-approve/reject).
+* **Webhooks & events**: emit fine-grained events and provide reliable delivery with retries, backoff, and dead-letter handling.
+* **Simulation & dry-run**: allow template owners to simulate workflows on sample resources to detect mapping/role gaps before activation.
+* **Observability**: provide metrics (latency to approve, tasks per user, missed SLAs) and error dashboards.
+* **Security**: least privilege scopes (read/write/execute/admin/approve) and ability to scope templates to channels/teams.
+* **UI-friendly payloads**: include UI hints in template definitions (labels, help text, widget types) so editors can render forms dynamically.
+* **Extensibility**: allow custom script hooks or function-call actions (with RBAC and sandboxing) to do automated checks or enrich context.
+* **Data residency & compliance**: keep audit/decision exports for required retention windows; allow export to compliance stores.
+
+---
+
+If you want, I can now:
+
+* generate OpenAPI snippets for the key endpoints (`template CRUD`, `start instance`, `task claim/complete`, `approval respond`), or
+* produce JSON schemas for `workflowTemplate`, `workflowInstance`, `task`, and `approvalRequest`, or
+* design the event/webhook payload schema used for `task.created`, `approval.requested`, and `instance.completed`.
+
+Pick one and I’ll produce it immediately.

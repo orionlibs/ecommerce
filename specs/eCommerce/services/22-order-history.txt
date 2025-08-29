@@ -1,0 +1,365 @@
+# Order History Service — REST API surface
+
+Nice — here’s a comprehensive, focused RESTful API design for an **Order History Service**. This service is the **immutable, append-only ledger / audit store** for order-related events and snapshots. It stores and serves historical timelines, snapshots, immutable audit entries, attachments (invoices/receipts/labels), archival/exports, replay to downstream systems, legal/retention operations (GDPR, legal-hold), and search/analytics read APIs.
+It **does not** own order business logic (creation, fulfillment, refunds) — those belong to the Order Management, Billing, Fulfillment, Payments, etc. services which push events into this service.
+
+Conventions
+
+* Base path: `https://api.example.com/v1/order-history`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths.
+* Content type: `application/json`. Bulk ingest accepts `application/x-ndjson` or `multipart/form-data` with S3 pointers. Attachments via presigned URLs.
+* Time: RFC3339 timestamps.
+* Pagination: cursor (`cursor` + `limit`) for timeline streaming; short `page`/`limit` for admin lists.
+* Responses: `200`, `201`, `202` (async), `204`, `400`, `401`, `403`, `404`, `409`, `422`, `500`.
+* Immutability: primary model is append-only events. Corrections are stored as new events with `correction_of` pointing to original, not by editing existing records.
+* Idempotency: ingestion endpoints accept `Idempotency-Key`.
+
+---
+
+# 1 — Event ingestion (append-only)
+
+Accept events from upstream services (Order Service, Billing, Fulfillment, Payment, Promotions). Validate schema, compute integrity hashes.
+
+* `POST /v1/order-history/events`
+  Purpose: Ingest a single event. Body example:
+
+  ```json
+  {
+    "event_id":"evt_0001",           // client-supplied for idempotency
+    "order_id":"ord_123",
+    "occurred_at":"2025-08-29T12:34:56Z",
+    "source":"order-service",
+    "type":"order.created",          // domain event type
+    "payload": { ... },              // arbitrary JSON payload
+    "schema_version":"v1",
+    "metadata": { "correlation_id":"...", "actor_id":"svc_order" }
+  }
+  ```
+
+  Response: `201` with stored event id, sequence number and integrity hash (e.g. SHA256).
+
+* `POST /v1/order-history/events/bulk`
+  Purpose: Bulk ingest NDJSON or file pointer (S3). Returns `202` with `job_id`.
+
+* `POST /v1/order-history/events/validate`
+  Purpose: Dry-run validate payload(s) against registered schemas without persisting (useful for producers).
+
+* `GET /v1/order-history/events/{eventId}`
+  Purpose: Retrieve stored event (immutable).
+
+* `GET /v1/order-history/events`
+  Purpose: List events with filters: `order_id`, `type`, `source`, `from`, `to`, `actor_id`, `has_attachments`. Supports `cursor`, `limit`.
+
+* `GET /v1/order-history/events/stream`
+  Purpose: Long-poll/stream (SSE / websocket) or server-side cursor to tail event stream for a tenant. Query filters allowed.
+
+Notes: service computes `sequence_number`, `ledger_hash` chain for tamper-evidence.
+
+---
+
+# 2 — Timeline & order-centric queries
+
+Primary read APIs to fetch immutable timeline for an order and reconstruct history.
+
+* `GET /v1/order-history/orders/{orderId}/timeline`
+  Purpose: Return full immutable timeline for an order (ordered by `occurred_at` / `sequence_number`). Query params: `from`, `to`, `cursor`, `limit`, `expand=attachments`.
+
+* `GET /v1/order-history/orders/{orderId}/timeline/aggregate`
+  Purpose: Return aggregated summary (count by event type, first/last timestamps, actors).
+
+* `GET /v1/order-history/orders/{orderId}/snapshot?at=2025-08-29T13:00:00Z`
+  Purpose: Reconstruct the order state as-of a timestamp by applying events or return persisted snapshot closest-before `at`. Useful for audits and dispute resolution.
+
+* `GET /v1/order-history/orders/{orderId}/events/{type}`
+  Purpose: Filter timeline by event type (e.g., `order.payment.*`).
+
+* `GET /v1/order-history/orders`
+  Purpose: Order-level listing by history presence: `last_event_before`, `has_recent_changes`, `customer_id`, `time_range`. (Read-only index for historical queries.)
+
+---
+
+# 3 — Snapshots (complete state captures)
+
+Store and retrieve periodic or ad-hoc snapshots of order state for faster as-of queries.
+
+* `POST /v1/order-history/orders/{orderId}/snapshots`
+  Purpose: Store a snapshot (producer uploads order state object). Body: `{ "snapshot_id":"snap_1", "captured_at":"...", "state":{...}, "source":"order-service", "metadata":{...} }` → `201`.
+
+* `GET /v1/order-history/orders/{orderId}/snapshots`
+  Purpose: List snapshots for that order (with captured\_at, size).
+
+* `GET /v1/order-history/snapshots/{snapshotId}`
+  Purpose: Retrieve snapshot payload (or presigned download URL if large).
+
+* `POST /v1/order-history/snapshots/compute`
+  Purpose: Request service to compute a new snapshot by folding events (async job) — useful when snapshots missing.
+
+* `DELETE /v1/order-history/snapshots/{snapshotId}`
+  Purpose: Admin-only deletions (audit retained via tombstone).
+
+---
+
+# 4 — Attachments & documents
+
+Store and fetch attachments associated with events: invoices, receipts, labels, signed POD.
+
+* `POST /v1/order-history/attachments/request-upload`
+  Purpose: Request presigned upload URL(s) for documents. Body: `{ "event_id","filename","content_type","size","tags":["invoice"] }` → returns presigned PUT URL.
+
+* `POST /v1/order-history/attachments`
+  Purpose: Register attachment metadata after upload (link to storage + hash). Body: `{ "event_id","url","hash":"sha256...", "filename","content_type","size" }` → `201`.
+
+* `GET /v1/order-history/attachments/{attachmentId}`
+  Purpose: Retrieve metadata and presigned download URL.
+
+* `GET /v1/order-history/events/{eventId}/attachments`
+  Purpose: List attachments for an event.
+
+* `DELETE /v1/order-history/attachments/{attachmentId}`
+  Purpose: Admin-only or per-retention policy (physical object may move to cold storage; keep attachment tombstone for audit).
+
+---
+
+# 5 — Corrections & amendments (append-only correction records)
+
+Corrections should be appended as events that reference originals rather than mutating.
+
+* `POST /v1/order-history/corrections`
+  Purpose: Append a correction event. Body: `{ "event_id":"evt_c01", "correction_of":"evt_0001", "order_id":"ord_123", "payload":{ "correction":"typo fixed", ... }, "occurred_at":"..." }` → `201`. System stores link between events.
+
+* `GET /v1/order-history/events/{eventId}/corrections`
+  Purpose: Show corrections referencing the event.
+
+* `GET /v1/order-history/corrections/{correctionId}`
+
+---
+
+# 6 — Search & analytics-friendly queries
+
+Advanced search across history for operations, compliance, and analytics.
+
+* `POST /v1/order-history/search`
+  Purpose: Full-text + fielded search DSL (e.g., search orders by `customer_email`, `tracking_number`, event payload text). Body: `{ "query":{...}, "filters":{...}, "sort":[...], "cursor":... }` → returns events or order ids.
+
+* `POST /v1/order-history/aggregations`
+  Purpose: Aggregations for dashboards (counts by type, trends, top error causes).
+
+* `POST /v1/order-history/topk`
+  Purpose: Top-K queries (top error messages, top actors by changes).
+
+---
+
+# 7 — Replay / publish / connectors
+
+Replay historical events or forward to other systems (for rehydration, reprocessing, migrations).
+
+* `POST /v1/order-history/replay`
+  Purpose: Replay events to a target connector. Body: `{ "order_id":"ord_123" | "query":{...}, "from":"...","to":"...","target":"kafka:topic|webhook:url|s3://...","format":"ndjson|avro", "dedupe":true }` → async `job_id`.
+
+* `GET /v1/order-history/replay/{jobId}`
+  Job status, counts, errors.
+
+* `POST /v1/order-history/connectors`
+  Purpose: Register connectors (Kafka, webhook, S3 sink). Body: `{ "type":"kafka|webhook|s3", "config":{...}, "filters":{...} }` → `201`.
+
+* `POST /v1/order-history/connectors/{id}/run` / `DELETE` / `GET` logs.
+
+---
+
+# 8 — Export & archival
+
+Export slices of history for BI, auditors, or cold-archival.
+
+* `POST /v1/order-history/exports`
+  Purpose: Export events/snapshots to S3/GS/Parquet/CSV. Body: `{ "query":{...}, "format":"parquet","destination":"s3://...","compress":true }` → returns `job_id`.
+
+* `GET /v1/order-history/exports/{jobId}` — status + download link.
+
+* `POST /v1/order-history/archive`
+  Purpose: Archive older events to cold storage (policy-driven). Async job.
+
+* `GET /v1/order-history/archive/{jobId}`
+
+---
+
+# 9 — Retention, legal-hold & GDPR / privacy operations
+
+Retention policies, legal holds, anonymization/pseudonymization, and erase requests.
+
+* `GET /v1/order-history/retention/policies`
+  Purpose: List tenant retention rules (per event type / attachment / docs).
+
+* `POST /v1/order-history/retention/policies` / `PATCH` / `DELETE` — admin management.
+
+* `POST /v1/order-history/legal-hold`
+  Purpose: Place an order or set of orders on legal hold (prevents deletion/archival). Body: `{ "target":"order|query","target_id":"ord_123", "case_id":"case_1", "expires_at":null }` → `201`.
+
+* `POST /v1/order-history/gdpr/erase-request`
+  Purpose: Start a GDPR right-to-be-forgotten flow for a subject (customer id / email). Body: `{ "subject_id":"cust_123", "scope":"order_data|attachments", "reason":"user_request" }` → async job. System returns report of what was redacted vs retained for legal reasons.
+
+* `POST /v1/order-history/gdpr/pseudonymize`
+  Purpose: Pseudonymize PII in events/snapshots while retaining audit chain (store hash mapping separately in secure store).
+
+* `GET /v1/order-history/gdpr/{jobId}` — status/report on erasure/pseudonymization job.
+
+Design note: never delete events under legal hold; instead redact PII fields and keep tombstones with audit.
+
+---
+
+# 10 — Tamper-evidence & verification
+
+APIs to verify ledger integrity, sequence continuity and to expose signed proofs.
+
+* `GET /v1/order-history/ledger/status`
+  Purpose: Return latest `sequence_number`, `ledger_hash` and chain length.
+
+* `GET /v1/order-history/ledger/proof?from=1000&to=2000`
+  Purpose: Return signed Merkle/chain proof of event range for external verification/auditor.
+
+* `GET /v1/order-history/events/{eventId}/verify`
+  Purpose: Return stored hash and verification result (true/false) comparing stored event content with hash (detect corruption).
+
+---
+
+# 11 — Webhooks & subscriptions
+
+Allow downstream systems to subscribe to history events (for replication, analytics).
+
+* `GET /v1/order-history/webhooks`
+
+* `POST /v1/order-history/webhooks` `{ "url":"https://...","events":["order.*","payment.*"], "filters":{"order_id":"...","type":"order.shipped"},"secret":"..." }` → `201`.
+
+* `DELETE /v1/order-history/webhooks/{id}` / `POST /v1/order-history/webhooks/test`
+
+* `POST /v1/order-history/subscriptions`
+  Purpose: Stateful subscription (cursor tracking) to ensure no missed events; returns subscription id + current cursor.
+
+* `POST /v1/order-history/subscriptions/{id}/ack` — acknowledge batch.
+
+---
+
+# 12 — Correction & dispute reconciliation
+
+Support dispute workflows that reference historical records.
+
+* `POST /v1/order-history/disputes`
+  Purpose: Create a dispute referencing history entries: `{ "dispute_id","order_id","related_event_ids":[...],"description" }`.
+
+* `GET /v1/order-history/disputes/{disputeId}`
+
+* `POST /v1/order-history/disputes/{disputeId}/resolve` — attach evidence (attachments), record resolution event (append-only).
+
+---
+
+# 13 — Audit, access logs & read-only RBAC
+
+Audit who read/queried history (sensitive), and manage roles.
+
+* `GET /v1/order-history/audit`
+  Purpose: Query audit log of administrative actions (who imported, who performed erasure, who requested proofs).
+
+* `GET /v1/order-history/access-logs`
+  Purpose: Read access logs (who accessed events/snapshots) — required for PII access audits.
+
+* `GET /v1/order-history/roles` / `POST /v1/order-history/roles` — define roles like `history_reader`, `auditor`, `admin`.
+
+---
+
+# 14 — Health, metrics & diagnostics
+
+Operational endpoints for SRE and data teams.
+
+* `GET /v1/order-history/health` — subsystems: ingest pipeline, storage, indexing, connector workers.
+* `GET /v1/order-history/metrics` — ingestion rate, event lag, replication lag, storage size, query latency.
+* `GET /v1/order-history/diagnostics` — queue depth, failed ingestion samples, last ingested sequence per source.
+
+---
+
+# 15 — Admin tools & maintenance
+
+Repair, compact, reindex, and purge jobs.
+
+* `POST /v1/order-history/jobs/reindex`
+  Purpose: Reindex historical events to search index (async).
+
+* `POST /v1/order-history/jobs/compact`
+  Purpose: Compact old events/snapshots into summarized forms (e.g., monthly snapshot). Async.
+
+* `POST /v1/order-history/jobs/repair`
+  Purpose: Repair missing sequence ranges by re-ingesting from source (requires connectors). Returns `job_id`.
+
+* `GET /v1/order-history/jobs/{jobId}`
+
+---
+
+# 16 — Example resources
+
+Event (stored):
+
+```json
+{
+  "id":"oh_evt_0001",
+  "sequence": 125678,
+  "order_id":"ord_123",
+  "occurred_at":"2025-08-29T12:34:56Z",
+  "received_at":"2025-08-29T12:34:58Z",
+  "source":"order-service",
+  "type":"order.payment.succeeded",
+  "payload": { "payment_id":"pay_abc", "amount":5194, "currency":"GBP" },
+  "schema_version":"v1",
+  "metadata": { "correlation_id":"corr-1", "actor_id":"svc_payments" },
+  "integrity": { "sha256":"<hex>", "ledger_hash":"<hex>" }
+}
+```
+
+Snapshot:
+
+```json
+{
+  "snapshot_id":"snap_ord_123_20250829T1234",
+  "order_id":"ord_123",
+  "captured_at":"2025-08-29T12:34:00Z",
+  "source":"order-service",
+  "state": { /* full order JSON */ },
+  "metadata": { "event_sequence":125670 },
+  "size_bytes": 12345
+}
+```
+
+Export job response:
+
+```json
+{
+  "job_id":"export_001",
+  "status":"running",
+  "submitted_by":"svc_analytics",
+  "query":{ "from":"2025-01-01","to":"2025-06-30","types":["order.*"] },
+  "destination":"s3://tenant-exports/oh/2025-H1.parquet"
+}
+```
+
+---
+
+# Design notes & best practices (brief)
+
+* **Append-only ledger:** treat events as immutable. Corrections are appended as explicit correction events referencing originals — never mutate past events. This makes audits and tamper-evidence easier.
+* **Tamper-evidence:** compute chain hashes/merkle trees per tenant and expose signed proofs for auditors. Keep an immutable ledger hash anchor (e.g., weekly anchor to signing service).
+* **Snapshots for performance:** store periodic snapshots to speed as-of queries and reduce need to replay many events. Snapshots are also immutable.
+* **Schema versioning & validation:** register schemas and reject or tag events with incompatible schemas. Provide validation endpoint for producers.
+* **Idempotent ingestion & ordering:** producers must supply idempotency keys / event ids. Service should detect duplicates and maintain per-source monotonic sequencing where possible.
+* **GDPR & legal-hold:** implement legal-hold that prevents deletion; use redaction/pseudonymization for erase requests and log what was redacted. Provide reports for compliance teams.
+* **Reliable replay:** support replay to downstream systems with cursor management and idempotency, and provide connector health & backpressure controls.
+* **Attachments storage:** use presigned URLs and store only metadata + integrity hash. Consider moving old attachments to cold storage and keep tombstones.
+* **Access controls & auditability:** read access to historical data (containing PII) should be logged. Provide fine-grained RBAC and access logs for audits.
+* **Observability & SLOs:** monitor ingestion lag, event loss, reindex success, and query latencies. Expose metrics so SRE & product can detect regressions.
+* **Backfill & repair flows:** implement robust backfill, reindex, and repair jobs with idempotency and detailed error reports.
+
+---
+
+If you’d like, I can next:
+
+* generate an **OpenAPI skeleton** for the most-used endpoints (`/events`, `/orders/{id}/timeline`, `/snapshots`, `/replay`, `/exports`),
+* design the **event storage schema** and ledger hash algorithm (DDL + pseudocode for chaining & proof),
+* or produce **JSON schemas** for canonical event and snapshot payloads (including validation rules and sample NDJSON bulk format).
+
+Which would you like me to produce now?

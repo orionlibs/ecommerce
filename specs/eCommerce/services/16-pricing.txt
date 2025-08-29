@@ -1,0 +1,472 @@
+# Product Pricing Service — REST API surface
+
+Nice — below is a comprehensive, focused RESTful API design for a **Product Pricing Service**. It contains *only* endpoints that belong to pricing concerns: canonical prices, price lists/price books, customer/pricing tiers, rules & adjustments, currency & exchange rates, price calculation/preview APIs, audits/history, bulk import/export, webhooks, and admin/config. I deliberately **do not** include carts, checkout, orders, stock, product CRUD, payments, or promotions/marketing flows that belong to separate services (except where a promotion directly affects price application — see price-rules section).
+
+## Conventions
+
+* Base path: `https://api.example.com/v1/pricing`
+* Auth: `Authorization: Bearer <token>` (OAuth2/JWT). Tenant via `X-Tenant-ID` header or tenant-scoped paths (`/v1/{tenantId}/pricing`) if multi-tenant.
+* Content type: `application/json`. Bulk uploads accept `multipart/form-data`/NDJSON or S3 pointer.
+* Pagination: `page`, `limit` or cursor (`cursor`, `limit`).
+* Common query params: `currency`, `price_list_id`, `customer_id`, `effective_at`, `sku`, `variant_id`.
+* Responses: `200 OK`, `201 Created`, `202 Accepted` (async), `204 No Content`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`, `500 Server Error`.
+* Idempotency: mutation endpoints should accept `Idempotency-Key` header for safe retries.
+
+---
+
+## 1. Canonical Price records (base per product/variant)
+
+Store the canonical/base price for a SKU/variant.
+
+* `GET /v1/pricing/prices`
+  List price records. Query: `sku`, `variant_id`, `currency`, `price_list_id`, `effective_at`, `page`, `limit`.
+
+* `POST /v1/pricing/prices`
+  Create a price record. Body example:
+
+  ```json
+  {
+    "sku":"SKU-123",
+    "variant_id":"v1",
+    "currency":"GBP",
+    "amount": 49.95,
+    "unit":"GBP",
+    "effective_from":"2025-09-01T00:00:00Z", 
+    "effective_to": null,
+    "price_type":"list|sale|contract|promotional", 
+    "price_list_id": "pl_default",
+    "metadata": { "source":"erp" }
+  }
+  ```
+
+  Response: `201` created price object.
+
+* `GET /v1/pricing/prices/{priceId}`
+  Retrieve a single price record (include audit/version).
+
+* `PATCH /v1/pricing/prices/{priceId}`
+  Partial update (effective windows, metadata, amount). Use optimistic concurrency via `If-Match`/`version`.
+
+* `DELETE /v1/pricing/prices/{priceId}`
+  Soft-delete or hard-delete (`?hard=true`) price record.
+
+* `GET /v1/pricing/prices/history?sku=...`
+  Get price history for SKU/variant (time-ordered).
+
+---
+
+## 2. Price Lists / Catalogs / Price Books
+
+Manage named price lists (public, channel-specific, promos, contract pricebooks).
+
+* `GET /v1/pricing/price-lists`
+  List price lists (filter by `channel`, `currency`, `active`).
+
+* `POST /v1/pricing/price-lists`
+  Create a price list. Body example:
+
+  ```json
+  {
+    "name":"EU Default",
+    "currency":"EUR",
+    "channel":"web-eu",
+    "priority": 100,            // used when multiple price lists apply
+    "effective_from":"2025-08-01T00:00:00Z",
+    "effective_to":null,
+    "public": true,
+    "metadata":{}
+  }
+  ```
+
+* `GET /v1/pricing/price-lists/{priceListId}`
+  Get price list details (includes count of items, first/last updated).
+
+* `PATCH /v1/pricing/price-lists/{priceListId}` / `DELETE /v1/pricing/price-lists/{priceListId}`
+
+* `POST /v1/pricing/price-lists/{priceListId}/prices/bulk`
+  Bulk upsert prices into a price list (NDJSON/CSV/S3 pointer). Returns job id for async import.
+
+* `GET /v1/pricing/price-lists/{priceListId}/prices`
+  List prices in a specific price list (supports pagination, search by sku/variant, min/max amount).
+
+* `POST /v1/pricing/price-lists/{priceListId}/activate` & `/deactivate`
+  Activate/deactivate price lists (atomically swap with other lists if needed).
+
+---
+
+## 3. Customer / Account-specific pricing & contracts
+
+Support contract prices, negotiated rates, and account-level overrides.
+
+* `GET /v1/pricing/accounts/{accountId}/price-lists`
+  Get price lists attached to a customer/account.
+
+* `POST /v1/pricing/accounts/{accountId}/price-lists`
+  Attach a price list or create account-specific price list (e.g., contract).
+
+* `POST /v1/pricing/accounts/{accountId}/overrides`
+  Create per-account overrides for items. Body: `{ "sku":"...","variant_id":"...","currency":"GBP","amount":39.95, "effective_from": "...", "note":"introductory contract" }`
+
+* `GET /v1/pricing/accounts/{accountId}/overrides` / `DELETE /v1/pricing/accounts/{accountId}/overrides/{overrideId}`
+
+* `GET /v1/pricing/accounts/{accountId}/tiers`
+  Customer-specific tiered pricing (see tiers section).
+
+---
+
+## 4. Price Rules, Adjustments & Promotions (pricing-side rules)
+
+Rules that transform base prices (discounts, markups, rounding, taxes passthrough). *Promotions engine may live elsewhere; pricing rules are the canonical rules that the price engine applies when calculating an effective price.*
+
+* `GET /v1/pricing/rules`
+  List pricing rules (filter by `active`, `type`).
+
+* `POST /v1/pricing/rules`
+  Create a rule. Body example:
+
+  ```json
+  {
+    "name":"Summer Sale 10%",
+    "type":"discount|surcharge|rounding|bulk|conditional_markdown",
+    "priority":100,
+    "active":true,
+    "conditions":{
+      "product":{"sku":["SKU-123","SKU-456"], "category":"headphones"},
+      "customer":{"segment":"vip"},
+      "date":{"from":"2025-08-01","to":"2025-08-31"},
+      "min_qty":1
+    },
+    "action": { "discount_type":"percentage","value":10 },
+    "stackable": false,
+    "applicability":"price_list|global|account",
+    "metadata": {}
+  }
+  ```
+
+  Response: `201` rule id.
+
+* `GET /v1/pricing/rules/{ruleId}` / `PATCH` / `DELETE`
+
+* `POST /v1/pricing/rules/{ruleId}/simulate`
+  Simulate rule application against sample product(s)/context and return transformed prices and explanation (useful for QA).
+
+* `POST /v1/pricing/rules/evaluate`
+  Given context, return which rules apply (without computing final price). Body: `{ "sku":"...","customer_id":"...","quantity":2,"price_list_id":"..." }` → returns matching rules sorted by priority.
+
+* `POST /v1/pricing/rules/bulk`
+  Bulk upsert rules (NDJSON) — returns job id.
+
+> Note: complex promotional coupons, combinatorics and A/B targeting are often kept in a Promotions/Offers service. Pricing rules here focus on deterministic transformations used during price calculation (promotional pricing may be reflected as a temporary price list + rule referencing the promo id).
+
+---
+
+## 5. Price Calculation / Price preview / Price engine (core runtime)
+
+Low-latency endpoints that compute the effective sell price given a context (the main runtime clients will hit at product listing and checkout).
+
+* `POST /v1/pricing/compute`
+  **Primary runtime**: compute effective price(s) for one or multiple items. Body example:
+
+  ```json
+  {
+    "request_id":"req-abc123",
+    "currency":"GBP",
+    "context": {
+      "customer_id":"cust_123",
+      "channel":"web-uk",
+      "country":"GB",
+      "pricing_date":"2025-08-29T12:00:00Z",
+      "promo_codes":["SUMMER10"],            // optional - pricing service may validate which rules to apply
+      "coupon_context":{...},
+      "delivery_type":"standard",
+      "tax_included":false
+    },
+    "items":[
+      { "sku":"SKU-1","variant_id":"v1","quantity":2, "price_list_ids":["pl_web","pl_vip"], "meta":{} },
+      { "sku":"SKU-2","variant_id":"v3","quantity":1 }
+    ],
+    "options": { "explain": true, "return_all_candidates": false, "rounding_mode":"commercial" }
+  }
+  ```
+
+  Response:
+
+  ```json
+  {
+    "request_id":"req-abc123",
+    "calculated_at":"2025-08-29T12:00:00Z",
+    "currency":"GBP",
+    "items":[
+      {
+        "sku":"SKU-1",
+        "variant_id":"v1",
+        "quantity":2,
+        "base_price": 49.95,
+        "price_list_id":"pl_web",
+        "adjustments":[
+          {"type":"discount","id":"rule_1","amount":-5.00,"reason":"SUMMER10 10%"},
+          {"type":"bulk_discount","id":"rule_7","amount":-2.00,"reason":"Buy 2 discount"}
+        ],
+        "tax": {"amount":1.50, "rate":0.075},
+        "final_unit_price": 44.45,
+        "final_total": 88.90,
+        "explain":[ "...rule contributions..." ]
+      }
+    ],
+    "totals": { "pre_tax": 98.90, "tax":1.50, "grand_total":100.40 }
+  }
+  ```
+
+  * `explain=true` returns rule-level breakdown and why a price\_list/override was chosen.
+  * Low latency is essential; support caching and per-tenant rate-limits.
+
+* `POST /v1/pricing/preview`
+  Lightweight preview for UI use (may hit cache, less verbose).
+
+* `POST /v1/pricing/validate-promo`
+  Validate a promo code or price override against rules and return applicable discounts (without applying).
+
+* `POST /v1/pricing/price-samples`
+  Return a set of candidate prices for A/B testing or display of “compare at” prices (e.g., show list, sale, members price).
+
+---
+
+## 6. Tiered & Volume pricing
+
+Support price per quantity tiers (volume discounts), subscription pricing, and per-unit breakpoints.
+
+* `GET /v1/pricing/tiers?sku=SKU-1`
+  List tier definitions for a SKU.
+
+* `POST /v1/pricing/tiers`
+  Create tiered pricing rules. Body example:
+
+  ```json
+  {
+    "sku":"SKU-1",
+    "currency":"GBP",
+    "tiers":[
+      { "min_qty":1, "max_qty":9, "unit_price":49.95 },
+      { "min_qty":10, "max_qty":99, "unit_price":44.95 },
+      { "min_qty":100, "max_qty":null, "unit_price":39.95 }
+    ],
+    "price_list_id":"pl_wholesale",
+    "effective_from":"..."
+  }
+  ```
+
+* `PATCH /v1/pricing/tiers/{tierId}` / `DELETE /v1/pricing/tiers/{tierId}`
+
+The compute engine must evaluate tiers when `quantity` is provided.
+
+---
+
+## 7. Currency & Exchange Rates
+
+Manage currencies, conversion rates and rounding rules for multi-currency pricing.
+
+* `GET /v1/pricing/currencies`
+  List supported currencies, minor unit, display format.
+
+* `POST /v1/pricing/currencies`
+  Add custom currency metadata (rare).
+
+* `GET /v1/pricing/exchange-rates?base=USD&date=...`
+  Get rates; support time-based queries for historical conversion.
+
+* `POST /v1/pricing/exchange-rates`
+  Upsert exchange rates (bulk). Body: `[{ "from":"USD","to":"GBP","rate":0.79,"effective_from":"2025-08-29T00:00:00Z" }, ...]`
+
+* `POST /v1/pricing/exchange-rates/refresh`
+  Pull latest rates from configured providers (async job).
+
+* `GET /v1/pricing/rounding-rules` / `POST /v1/pricing/rounding-rules`
+  Define rounding strategies per currency or channel (bankers, commercial, per-country VAT rounding rules).
+
+---
+
+## 8. Price experiments & A/B testing
+
+APIs to support price A/B tests (managed here or via Experiments service — basic hooks included).
+
+* `POST /v1/pricing/experiments`
+  Create a pricing experiment (variants point to different price lists or rules). Body: `{ "name":"black-friday-pricing","variants":[{"id":"A","price_list":"pl_default"},{"id":"B","price_list":"pl_bf"}], "traffic_allocation":[50,50], "start":"...","end":"..." }`
+
+* `GET /v1/pricing/experiments/{id}` / `PATCH` / `DELETE`
+
+* `POST /v1/pricing/experiments/{id}/assign`
+  Force-assign a customer/session to a variant for debugging.
+
+* `GET /v1/pricing/experiments/{id}/results`
+  Summarize impact metrics (requires integration with analytics/events).
+
+---
+
+## 9. Audit / Price history / Change logs
+
+Track who changed prices, when, and why (compliance & rollback).
+
+* `GET /v1/pricing/audit`
+  Query audit logs by `actor_id`, `sku`, `price_list_id`, `action=create|update|delete`, `from`, `to`.
+
+* `GET /v1/pricing/audit/{eventId}`
+
+* `POST /v1/pricing/prices/{priceId}/rollback`
+  Roll back to prior version(s) (admin operation).
+
+* `GET /v1/pricing/price-history/{sku}`
+  Time-series of price snapshots (useful for analytics & reconciliation).
+
+---
+
+## 10. Bulk operations, imports & exports
+
+Large-scale update flows (ERP syncs, price feeds).
+
+* `POST /v1/pricing/imports`
+  Start bulk import job (CSV/NDJSON or S3 pointer). Body: `{ "source":"s3://bucket/prices.csv","mode":"upsert|replace","mapping":{...},"price_list_id":"pl_import" }` → returns job id.
+
+* `GET /v1/pricing/imports/{jobId}` — status, errors.
+
+* `POST /v1/pricing/exports`
+  Export prices/price lists to CSV/Parquet to S3. Body: `{ "filter":{...}, "format":"csv", "destination":"s3://..." }` → job id.
+
+* `POST /v1/pricing/prices/bulk`
+  Bulk upsert via NDJSON body (sync) or via file (async). Returns job id.
+
+* `POST /v1/pricing/recalculate`
+  Recompute derived prices (e.g., recalc all final prices after rate change), returns job id.
+
+---
+
+## 11. Webhooks & Events
+
+Notify other services on price list publish, price change, rule activation, etc.
+
+* `GET /v1/pricing/webhooks`
+
+* `POST /v1/pricing/webhooks` `{ "url":"https://...","events":["price.created","price.updated","price_list.activated","rule.activated"], "secret":"..." }` → returns webhook id.
+
+* `DELETE /v1/pricing/webhooks/{id}`
+
+* `POST /v1/pricing/webhooks/test` — send test payload.
+
+Event payloads should include `before`/`after` snapshots for price updates.
+
+---
+
+## 12. Monitoring, metrics & health
+
+Expose service health and usage.
+
+* `GET /v1/pricing/health` — subsystem health (db, cache, job queue).
+* `GET /v1/pricing/metrics` — usage metrics: requests per second, compute latency p50/p95/p99 for `/compute`, cache hit rate, number of active price lists, daily price updates.
+* `GET /v1/pricing/quotas` — per-tenant quotas (rate limits, price-record counts).
+
+---
+
+## 13. Admin / Settings
+
+Configure global pricing behavior, tax integration stubs and caching policies.
+
+* `GET /v1/pricing/settings`
+  Settings: `default_currency`, `include_taxes_by_default`, `allow_negative_price`, `price_cache_ttl_seconds`, `price_priority_resolution` (how to select between multiple price lists).
+
+* `PATCH /v1/pricing/settings` — update admin settings.
+
+* `GET /v1/pricing/capabilities` — features enabled for tenant (multi-currency, account-pricing, price-experiments, rounding).
+
+* `POST /v1/pricing/cache/invalidate`
+  Invalidate cached price entries by `sku`, `price_list_id`, `account_id`, or pattern.
+
+---
+
+## 14. Price simulation / sandbox tools
+
+APIs for previewing broad impacts of price changes (what-if analyses).
+
+* `POST /v1/pricing/simulate`
+  Run scenario simulation: mass change spec (e.g., increase MSRP 5% for category), time-window, sample traffic, and return expected revenue delta, price histogram, and affected SKUs. Returns job id.
+
+* `GET /v1/pricing/simulations/{id}`
+
+* `POST /v1/pricing/preview-batch`
+  Generate preview of new prices for UI (paged).
+
+---
+
+## 15. Security & API keys
+
+Manage API keys for storefront read-only calls vs admin writes.
+
+* `GET /v1/pricing/keys`
+
+* `POST /v1/pricing/keys` `{ "name":"storefront-read","scopes":["compute:price:read"], "expires_in":"30d" }` → returns plaintext key once.
+
+* `DELETE /v1/pricing/keys/{keyId}`
+
+---
+
+## Example Price compute request/response
+
+**Request**
+
+```json
+POST /v1/pricing/compute
+{
+  "request_id":"req-001",
+  "currency":"GBP",
+  "context": { "customer_id":"cust_123", "channel":"web-uk", "country":"GB", "pricing_date":"2025-08-29T12:00:00Z" },
+  "items":[
+    { "sku":"SKU-1", "variant_id":"v1", "quantity":3 },
+    { "sku":"SKU-2", "variant_id":"v2", "quantity":1 }
+  ],
+  "options": { "explain":true }
+}
+```
+
+**Response**
+
+```json
+{
+  "request_id":"req-001",
+  "calculated_at":"2025-08-29T12:00:00Z",
+  "currency":"GBP",
+  "items":[
+    {
+      "sku":"SKU-1","variant_id":"v1","quantity":3,
+      "base_price":49.95,"price_list_id":"pl_web",
+      "adjustments":[{"type":"discount","id":"rule_1","amount":-4.995}],
+      "final_unit_price":44.96,"final_total":134.88,
+      "explain":[ {"rule":"rule_1","contribution":-4.995} ]
+    }
+  ],
+  "totals":{"pre_tax":154.84,"tax":null,"grand_total":154.84}
+}
+```
+
+---
+
+## Design notes & best practices (brief)
+
+* **Separation of concerns:** pricing service is the canonical source of price data and transforms. Promotions/coupons, checkout, and orders live elsewhere and call pricing/compute when needed. If a Promotions service exists, reflect offers into pricing as ephemeral price-lists or rules referencing promo ids.
+* **Price lists + priority:** allow multiple active price lists and deterministic resolution via `priority`, `applicability`, and `effective_from`/`to`. Return the chosen price\_list in compute responses.
+* **Deterministic rule evaluation:** rules need clear priority, stackability, and deterministic tie-breaking to avoid surprises. Provide `simulate` and `explain` endpoints.
+* **Idempotency & concurrency:** use `Idempotency-Key` for bulk imports and price writes. Use optimistic concurrency (`version`/`ETag`) for edits.
+* **Low-latency compute:** price compute must be low-latency — use cached price caches (Redis/edge), precomputed price lists and pre-evaluated rule sets where possible. Provide a lightweight `preview` endpoint for UI usage that may accept slightly stale caches.
+* **Rounding & taxes:** expose rounding rules and whether prices are tax-inclusive. Actual tax calculation may live in Tax Service — pricing should be able to accept/return tax info (tax rate or tax\_id) but avoid embedding tax rule complexity if a Tax Service exists.
+* **Historical fidelity:** store price history and audit trail for compliance, reporting, and rollback.
+* **Bulk & sync:** most enterprises sync prices from ERP/Excel feeds — provide robust import jobs, mapping, and dry-run validations.
+* **Testing & QA:** `simulate` and `rule.simulate` are essential for pricing teams to validate campaigns without impacting live price lists.
+* **Security:** expose read-only API keys for storefronts with tight rate-limits and short TTLs. Admin operations should be limited to service-to-service auth.
+* **Observability:** instrument compute latency, cache hit-rate, rule-evaluation time, and import job errors to SRE/ops dashboards.
+
+---
+
+If you want, I can next:
+
+* generate an **OpenAPI (Swagger) skeleton** for the most-used endpoints (`/compute`, `/price-lists`, `/prices`, `/rules`, `/imports`),
+* produce detailed **JSON schemas** for `compute` request/response and a `price-list` import NDJSON mapping,
+* or design a **low-latency compute architecture** (caching, rule engine, fast path vs. full evaluation) with a suggested data model.
+
+Which one should I produce now?

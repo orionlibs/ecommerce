@@ -1,0 +1,330 @@
+# Product Category & Taxonomy Service — REST API endpoints
+
+Nice — below is a focused, production-ready REST surface for the **Product Category & Taxonomy Service** (the system that owns hierarchical categories, multi-taxonomy classification schemes, category attributes/SEO, automated (smart) category rules, product→category assignments, and the APIs other services call to browse/look up categories). This service manages taxonomy models and classification only — **no product CRUD, pricing, inventory, or cart/order endpoints**.
+
+Assumed base path: `/api/v1` and resources are store-scoped: `/api/v1/stores/{storeId}/...`. All list endpoints support pagination (`page`/`per_page` or cursor) and common `sort`/`q` filters. Auth scopes shown as examples: `taxonomy:read`, `taxonomy:write`, `taxonomy:admin`.
+
+---
+
+## Taxonomies (top-level classification systems)
+
+Taxonomy = a named classification schema (e.g., `Categories`, `Departments`, `Catalog A/B`, `Google Product Taxonomy`).
+
+* `POST /stores/{storeId}/taxonomies`
+  Create taxonomy. Body: `{id?, name, handle, description, locale_defaults?, metadata}`
+  Auth: `taxonomy:admin`
+  Response: `201` taxonomy resource.
+
+* `GET /stores/{storeId}/taxonomies`
+  List taxonomies. Query: `q`, `active`, `page`, `per_page`.
+  Auth: `taxonomy:read`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}`
+  Get taxonomy details (default root nodes, settings). Option: `?include=roots,settings`.
+  Auth: `taxonomy:read`
+
+* `PATCH /stores/{storeId}/taxonomies/{taxonomyId}`
+  Update taxonomy metadata/settings.
+  Auth: `taxonomy:admin`
+
+* `DELETE /stores/{storeId}/taxonomies/{taxonomyId}`
+  Soft-delete taxonomy (validate usage). `?force=true` for hard delete.
+  Auth: `taxonomy:admin`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/settings`
+  Taxonomy settings: `hierarchy_type` (`tree|flat`), `slug_policy`, `auto_assign` defaults, `channel_visibility`.
+  Auth: `taxonomy:read`
+
+---
+
+## Category Nodes (hierarchical nodes)
+
+Core CRUD for categories within a taxonomy. Node = category (title, slug, parent, children, SEO, attributes).
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories`
+  Create category node (top-level unless `parent_id` provided). Body: `{title, slug?, parent_id?, description, position?, seo:{title,meta_description,canonical}, visibility:{channels:[],published:true/false},attributes:{...},metadata}`
+  Auth: `taxonomy:write`
+  Response: `201` category resource.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories`
+  List categories (flat or optional tree). Query params:
+  `?tree=true|false` (tree returns nested children), `parent_id`, `depth` (limit depth), `q` (text search), `page`, `per_page`, `include=ancestors,descendants,product_count`.
+  Auth: `taxonomy:read`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}`
+  Get single category with optional expansions: `?include=ancestors,children,descendants,products,seo`.
+  Auth: `taxonomy:read`
+
+* `PATCH /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}`
+  Partial update (title, slug, description, attributes, SEO, visibility). Support `If-Match`/ETag for concurrency.
+  Auth: `taxonomy:write`
+
+* `PUT /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}`
+  Replace category node (rare).
+  Auth: `taxonomy:admin`
+
+* `DELETE /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}`
+  Soft-delete or archive category. Query `reassign_children_to={categoryId}` or `cascade=true` to remove subtree. `?force=true` for hard-delete. Returns list of affected product assignments if any.
+  Auth: `taxonomy:admin`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/restore`
+  Restore soft-deleted category (if supported).
+  Auth: `taxonomy:admin`
+
+---
+
+## Tree Operations (reorder / move / bulk reorder)
+
+Operations to move nodes around the tree without full updates.
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/move`
+  Move node. Body: `{new_parent_id?, position?}`. Validates cycles and returns new path.
+  Auth: `taxonomy:write`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/reorder`
+  Reorder multiple siblings. Body: `{parent_id, ordered_category_ids[]}` — idempotent.
+  Auth: `taxonomy:write`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/promote`
+  Promote (make top-level) or demote. Body: `{action:"promote"|"demote"}`.
+  Auth: `taxonomy:write`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/bulk-move`
+  Bulk move many categories: Body contains mapping `[{category_id, new_parent_id, position}]`. Returns `job_id`.
+  Auth: `taxonomy:admin`
+
+---
+
+## Slugs, URLs & Breadcrumbs
+
+Lookup by slug, generate breadcrumb paths, manage redirects.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/lookup?slug=mens/shirts`
+  Resolve category by full slug path or single slug. Returns category id and canonical path. Support `channel_id` to resolve channel-scoped slugs.
+  Auth: public read for published categories or `taxonomy:read` for admin-only.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/path`
+  Get full breadcrumb path (ancestor list). Option: `?locale=en-GB&channel_id=...` to get localized titles.
+  Auth: `taxonomy:read`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/slug-check`
+  Check slug availability and proposed redirect suggestions. Body: `{proposed_slug, channel_id}`; returns `{available:boolean, conflicts:[...], suggested_slug}`.
+  Auth: `taxonomy:write`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/redirects`
+  Create redirect rules for moved/renamed slugs. Body: `{from:'/old/path', to:'/new/path', status_code:301|302, active}`.
+  Auth: `taxonomy:admin`
+
+---
+
+## Category Attributes & SEO (category-specific metadata)
+
+Categories often have their own attributes (landing banners, sort options, facet settings).
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/attributes`
+  Get attribute values assigned to this category (e.g., `landing_image_id`, `sort_default`, `facet_config`).
+  Auth: `taxonomy:read`
+
+* `PATCH /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/attributes`
+  Update category attributes (partial).
+  Auth: `taxonomy:write`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/seo-preview`
+  Generate SEO preview (title tag, meta desc, structured data) for admin UI. Body: `{locale, channel_id}`.
+  Auth: `taxonomy:read`
+
+---
+
+## Product Assignments & Mappings
+
+Manage which products are assigned to categories. (This service stores mappings only; product service owns product metadata.)
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/products`
+  Assign product(s) to category (manual). Body: `{product_ids:[], positions?:[]}` supports bulk. Returns assignment ids or `job_id` for large lists.
+  Auth: `taxonomy:write`
+
+* `DELETE /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/products/{productId}`
+  Remove a product mapping from category.
+  Auth: `taxonomy:write`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/products`
+  List products assigned to category (paginated). Query: `status`, `sort`, `include=product_minimal_fields`. Note: returns product IDs & minimal metadata — full product data from Product Service.
+  Auth: `taxonomy:read`
+
+* `GET /stores/{storeId}/products/{productId}/categories`
+  List categories a product belongs to (all taxonomies). Useful for product admin UIs.
+  Auth: `taxonomy:read`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/assignments/bulk`
+  Bulk assign/unassign operations (CSV/JSON). Body: operations with `product_id, category_id, action`. Returns `job_id`.
+  Auth: `taxonomy:admin`
+
+---
+
+## Smart/Automated Categories (rules-based)
+
+Support smart categories defined by rules (e.g., `category = "Red" AND vendor="Acme"`). The service evaluates and stores results or exposes query for evaluation.
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/rules`
+  Create/update smart rule. Body: `{type:"smart", rule_expression, priority, preview_limit}`. `rule_expression` is a structured DSL or JSON logic (e.g., attribute filters referencing Product attributes).
+  Auth: `taxonomy:admin`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/rules/preview`
+  Preview matched product ids up to `limit` (returns sample product IDs + count). Query: `limit=50`.
+  Auth: `taxonomy:read`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/rules/evaluate`
+  Trigger evaluation job to materialize matches (optional). Returns `job_id`.
+  Auth: `taxonomy:admin`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/rules/status`
+  Status & last-run timestamp.
+  Auth: `taxonomy:read`
+
+* `DELETE /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/rules`
+  Remove rule (turns category into manual unless other rules exist).
+  Auth: `taxonomy:admin`
+
+---
+
+## Facets & Category-level Facet Configuration
+
+Which facets appear on category pages and default sort options.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/facets`
+  Get facet configuration (enabled attributes, order, multi-select).
+  Auth: `taxonomy:read`
+
+* `PATCH /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/facets`
+  Update facet config and default sort.
+  Auth: `taxonomy:write`
+
+---
+
+## Localization & Translations
+
+Categories are localized (title, description, slug variations).
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/translations`
+  List translations and locales.
+  Auth: `taxonomy:read`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/translations/{locale}`
+  Create/Update translation for locale. Body: localized fields (`title`, `description`, `slug`, `seo`).
+  Auth: `taxonomy:write`
+
+* `DELETE /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/translations/{locale}`
+  Remove translation.
+  Auth: `taxonomy:admin`
+
+---
+
+## Search, Lookup & Public Read APIs
+
+Optimised read endpoints for storefronts and search services (often cached or exported to CDN).
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/public/categories`
+  Public listing of published categories (tree or flattened). Query params: `?tree=true&channel_id=&locale=`. Should be cacheable/CDN-friendly.
+  Public scope: read only for published categories.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/public/categories/{path_or_slug}`
+  Resolve category by slug path for storefront rendering. Returns published category data + facet config + sample product count. Cacheable.
+  Public read.
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/export`
+  Export taxonomy or subtree (JSON/CSV/Tree). Query: `category_id, format=json|csv, include_products=false`. Returns `export_job_id` or signed link.
+  Auth: `taxonomy:read` or `taxonomy:admin`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/categories/index`
+  Reindex taxonomy into search/edge caches (full or delta). Body: `{category_ids[], full:boolean}` returns `job_id`.
+  Auth: `taxonomy:admin`
+
+---
+
+## Bulk Import / Export / Jobs
+
+Migrations and large operations must be async.
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/import`
+  Import category tree (CSV/ZIP/JSON). Options: `mode=upsert|replace`, `validate_only`. Returns `import_job_id`.
+  Auth: `taxonomy:admin`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/import/{jobId}`
+  Import job status & error report.
+  Auth: `taxonomy:admin`
+
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/export`
+  Export job for taxonomy/subtree. `?include_products=true` optionally. Returns `export_job_id`.
+  Auth: `taxonomy:admin`
+
+* `GET /api/v1/stores/{storeId}/jobs/{jobId}`
+  Generic job status endpoint.
+  Auth: `taxonomy:read`
+
+---
+
+## Audit Logs & History
+
+Track changes (who moved a node, assignment changes).
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/audit-logs`
+  List taxonomy-level audit events. Queryable by `actor_id`, `action`, `since`, `until`.
+  Auth: `taxonomy:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/audit-logs`
+  Category change history (parent changes, title changes, slug updates).
+  Auth: `taxonomy:admin` or `compliance:read`
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/categories/{categoryId}/versions`
+  Version history for category (useful for rollbacks), including diffs.
+  Auth: `taxonomy:read`
+
+---
+
+## Webhooks & Events
+
+Notify other services when taxonomy changes so they can reindex, update storefront caches, or update product assignments.
+
+* `POST /stores/{storeId}/webhooks`
+  Register webhook for taxonomy events. Events: `taxonomy.created`, `taxonomy.updated`, `category.created`, `category.updated`, `category.moved`, `category.deleted`, `category.products_changed`, `category.rule.evaluated`. Body: `{url,events,secret,active,filters}`.
+  Auth: `taxonomy:admin`
+
+* `GET /stores/{storeId}/webhooks/{webhookId}/deliveries`
+  Delivery attempts & failure logs.
+  Auth: `taxonomy:admin`
+
+---
+
+## Admin Helpers & Utilities
+
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/suggestions?q=shoes` — category name/slug suggestions & auto-complete for admin UI. Auth: `taxonomy:read`.
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/sync-status` — status of last syncs to Search/Storefront caches (index lag). Auth: `taxonomy:admin`.
+* `GET /stores/{storeId}/taxonomies/{taxonomyId}/usage-stats` — counts (categories, published, product assignments), top categories by product count. Auth: `taxonomy:read` or `billing:read`.
+* `POST /stores/{storeId}/taxonomies/{taxonomyId}/validate` — validates taxonomy payload (detect cycles, slug conflicts, reserved words) returns `valid` + `errors`. Auth: `taxonomy:write`.
+
+---
+
+## Cross-cutting considerations & best practices
+
+* **Separation of concerns:** this service stores taxonomy models and product→category *mappings only*. Product content remains in Product Service — responses must return product IDs and optionally minimal product metadata only.
+* **Public read endpoints:** provide CDN-cacheable public read endpoints for published categories and slug resolution to avoid hitting admin APIs from storefront traffic.
+* **ETags / optimistic concurrency:** use `ETag`/`If-Match` for updates and tree moves to prevent race conditions.
+* **Atomic tree moves:** ensure `move` operations are atomic and validate for cycles; provide transactional rollback.
+* **Smart categories rules DSL:** express rules in a portable, auditable DSL (JSON Logic or similar) that references product attributes by canonical attribute keys. The Category Service should not evaluate product attributes directly — instead it emits rule evaluation jobs that coordinate with Product/Search services or request product IDs via the Product/Search APIs.
+* **Slug uniqueness per channel/locale:** slug resolution must be aware of channel and locale scopes; provide `slug-check` endpoints and redirect management.
+* **Materialized vs dynamic lists:** support both materialized lists (evaluation jobs that store product ids) and dynamic lookups (on-the-fly queries), letting clients choose. Materialized lists should support scheduled re-evaluation.
+* **Audit & governance:** all changes to the taxonomy or product assignments must be auditable (actor, timestamp, before/after).
+* **Scale & pagination:** product→category lists can be huge; use cursor-based pagination and provide `job`-based exports for full dataset transfers.
+* **Security & scopes:** fine-grained scopes — allow channel-scoped roles (e.g., UI editors only for a given channel).
+* **Search integration:** provide reindex triggers and stream events so Search/Feed services can update category facets & counts.
+* **Backward compatibility:** avoid breaking changes to category IDs and slug behavior; use versioned APIs where needed.
+
+---
+
+If you’d like, I can now:
+
+* generate OpenAPI definitions for the most used endpoints (`categories CRUD`, `move/reorder`, `lookup`, `assign products`), or
+* produce JSON schema examples for `taxonomy`, `category`, `category-rule`, and `assignment` resources, or
+* design the `rule` DSL schema and evaluate-job model used for smart categories.
+
+Tell me which and I’ll produce it immediately.
