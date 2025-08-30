@@ -100,6 +100,7 @@ dependencies {
     //implementation("io.jsonwebtoken:jjwt-api:0.12.6")
     //runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")
     //runtimeOnly("io.jsonwebtoken:jjwt-jackson:0.12.6")
+    //implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.20.0")
 
     compileOnly("org.projectlombok:lombok")
     annotationProcessor("org.projectlombok:lombok")

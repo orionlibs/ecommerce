@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -23,8 +24,8 @@ public class GlobalExceptionHandler
     private String duplicateDatabaseRecordErrorMessage;
     @Value("${error.api.not_found.message:Resource not found: }")
     private String resourceNotFoundErrorMessage;
-    //@Value("${error.api.access_denied.message:Access denied}")
-    //private String accessDeniedErrorMessage;
+    @Value("${error.api.access_denied.message:Access denied}")
+    private String accessDeniedErrorMessage;
     @Value("${error.api.generic_error.message:An unexpected error occurred}")
     private String genericErrorErrorMessage;
 
@@ -73,7 +74,7 @@ public class GlobalExceptionHandler
     }
 
 
-    /*@ExceptionHandler(AuthorizationDeniedException.class)
+    @ExceptionHandler(AuthorizationDeniedException.class)
     public ResponseEntity<APIError> handleForbiddenExceptions(Exception ex)
     {
         APIError apiError = new APIError(
@@ -83,7 +84,7 @@ public class GlobalExceptionHandler
                         null);
         Logger.error("Access denied: {}", ex.getMessage());
         return ResponseEntity.status(apiError.status()).body(apiError);
-    }*/
+    }
 
 
     @ExceptionHandler(IdempotencyConflictException.class)

@@ -22,9 +22,6 @@ spring:
   threads:
     virtual:
       enabled: true
-  jackson:
-    property-naming-strategy: LOWER_CAMEL_CASE
-    #property-naming-strategy: SNAKE_CASE
 
 version: 0.0.1
 environment: ${ENVIRONMENT_NAME:production}
